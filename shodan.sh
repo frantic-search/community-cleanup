@@ -120,16 +120,14 @@ A community cleanup initiative
 https://github.com/ilatypov/community-cleanup
 """ % (e, prodname, component, "\n  ".join(emails[e])))
 
-    me = myaddr
-    if testing:
-        you = myaddr
-    else:
-        you = e
+    recipients = [myaddr]
+    if not testing:
+        recipients.append(e)
     msg["Subject"] = "Community cleanup: your %s needs attention" % (prodname,)
     msg["From"] = me
-    msg["To"] = you
+    msg["To"] = e
     s = smtplib.SMTP("localhost")
-    s.sendmail(me, [you], msg.as_string())
+    s.sendmail(myaddr, recipients, msg.as_string())
     s.quit()
 
 ' ${testing} "${myaddr}" "${component}" "${country}" "${product}" < "${tmp}/hosts-num.txt" > "${tmp}/hosts-emails.txt"
