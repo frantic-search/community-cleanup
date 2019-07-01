@@ -98,7 +98,8 @@ for line in iter(sys.stdin.readline, ""):
             else:
                 eaddrs = []
                 emails[e] = eaddrs
-            eaddrs.append(h)
+            if h not in eaddrs:
+                eaddrs.append(h)
 sys.stderr.write("\n")
 for e in emails:
     print "%s: %s\n" % (e, ", ".join(emails[e]))
@@ -124,7 +125,7 @@ https://github.com/ilatypov/community-cleanup
     if not testing:
         recipients.append(e)
     msg["Subject"] = "Community cleanup: your %s needs attention" % (prodname,)
-    msg["From"] = me
+    msg["From"] = myaddr
     msg["To"] = e
     s = smtplib.SMTP("localhost")
     s.sendmail(myaddr, recipients, msg.as_string())
