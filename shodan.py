@@ -11,6 +11,8 @@ e.g.,
 """
 
 from urllib import request, parse
+from urllib.error import HTTPError, URLError
+import ssl
 import json
 from ipaddress import ip_address
 import struct, socket, sys, os
@@ -33,7 +35,7 @@ def search_shodan(**kwargs):
     query = "http.component:{component} country:{country}".format(**kwargs)
     sys.stderr.write("Inquiring shodan.io with a query %s...\n" % (query,))
 
-    handler = request.HTTPHandler(debuglevel=10)
+    handler = request.HTTPSHandler(debuglevel=kwargs.get("debuglevel", 0))
     opener = request.build_opener(handler)
 
     with opener.open(request.Request("https://api.shodan.io/shodan/host/search",
@@ -69,7 +71,15 @@ def whoseip(ip, prop):
     return propvalues
 
 
-def send_notifications(infected_hosts, testing, myaddr, cache_name):
+def send_notifications(infected_hosts, prodfilter, component, testing, myaddr, cache_name, debuglevel=0):
+    ssl_handler = request.HTTPSHandler(debuglevel=debuglevel, context=ssl._create_unverified_context(), check_hostname=False)
+    ssl_opener = request.build_opener(ssl_handler)
+
+    plain_handler = request.HTTPHandler(debuglevel=debuglevel)
+    plain_opener = request.build_opener(plain_handler)
+
+    componentfilter = component.lower()
+
     cached_emails = {}
     with open(os.path.expanduser(cache_name)) as f:
         for line in f:
@@ -88,12 +98,36 @@ def send_notifications(infected_hosts, testing, myaddr, cache_name):
 
     emails = {}
 
-    for (ip, product) in infected_hosts:
+    for (ip, product, port, is_ssl) in infected_hosts:
         sys.stderr.write("%s\n" % (ip,))
         if prodfilter:
             if prodfilter not in product.lower():
                 sys.stderr.write("  *** %s\n" % (product,))
                 continue
+        if is_ssl:
+            opener = ssl_opener
+            url = "https://%s:%s/" % (ip, port)
+        else:
+            opener = plain_opener
+            url = "http://%s:%s/" % (ip, port)
+
+        try:
+            with opener.open(url, timeout=5) as response:
+                html = response.read().decode("utf-8", errors="replace")
+                if componentfilter not in html.lower():
+                    sys.stderr.write(" *** HTML %r... at %s does not show \"%s\"\n" % (html[:20],
+                        url, componentfilter))
+                    continue
+        except HTTPError as e:
+            html = e.read().decode("utf-8", errors="replace")
+            if componentfilter not in html.lower():
+                sys.stderr.write(" *** HTML %r... at %s does not show \"%s\" and responds with code %s\n" % (html[:20],
+                    url, componentfilter, e.code))
+                continue
+        except URLError as e:
+            sys.stderr.write(" *** Timed out on \"%s\"\n" % (url,))
+            continue
+
         for e in whoseip(ip, "OrgAbuseEmail"):
             sys.stderr.write("  %s\n" % (e,))
             ehosts = emails.get(e, [])
@@ -144,30 +178,41 @@ https://github.com/ilatypov/community-cleanup
             f.write("%s: %s\n" % (e, ", ".join(str(ehost) for ehost in ehosts)))
 
 
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) < 2:
+def main(argv):
+    if len(argv) < 2:
         raise Usage()
     i = 1
-    if sys.argv[i] == "-t":
+    if argv[i] == "-d":
+        debuglevel = 1
+        i += 1
+    else:
+        debuglevel = 0
+    if argv[i] == "-t":
         testing = True
         i += 1
     else:
         testing = False
-    if len(sys.argv) < i + 2:
+    if len(argv) < i + 2:
         raise Usage()
-    (component, country) = sys.argv[i:i + 2]
-    if len(sys.argv) == i + 3:
-        prodfilter = sys.argv[i + 2].lower()
-    elif len(sys.argv) < i + 3:
+    (component, country) = argv[i:i + 2]
+    if len(argv) == i + 3:
+        prodfilter = argv[i + 2].lower()
+    elif len(argv) < i + 3:
         prodfilter = None
     else:
         raise Usage()
     myaddr = "{USER}@{HOSTNAME}".format(USER=os.environ["USER"], HOSTNAME=socket.gethostname())
-    shodan_results = search_shodan(component=component, country=country, prodfilter=prodfilter)
+    shodan_results = search_shodan(component=component, country=country, prodfilter=prodfilter, debuglevel=debuglevel)
     sys.stderr.write("Found matches: {numhosts}\n".format(numhosts=len(shodan_results["matches"])))
-    infected_hosts = tuple((ip_address(match["ip"]), match["product"]) for match in shodan_results["matches"])
+    infected_hosts = tuple((ip_address(match["ip"]), match["product"], match["port"], not not match.get("ssl")) for match in shodan_results["matches"])
     cache_name = "email-hosts.txt"
-    send_notifications(infected_hosts, testing, myaddr, cache_name)
+    send_notifications(infected_hosts, prodfilter, component, testing, myaddr, cache_name)
+
+
+if __name__ == "__main__":
+    import sys
+    # Wrapping parameter parsing into a function call prevents from spilling
+    # them into the global namespace and accidentally using them in the other
+    # functions.
+    main(sys.argv)
 
