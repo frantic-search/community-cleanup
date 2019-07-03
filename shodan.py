@@ -23,6 +23,7 @@ from email.mime.text import MIMEText
 
 ANICHOST = "whois.arin.net"
 
+SEND_PAGES = 3
 
 class Usage(SystemExit):
     def __init__(self):
@@ -157,7 +158,10 @@ def filter_hosts(infected_hosts, prodfilter, component, testing, myaddr, ready_e
                     url, componentfilter, e.code))
                 continue
         except URLError as e:
-            sys.stderr.write(" *** Timed out on \"%s\"\n" % (url,))
+            sys.stderr.write(" *** HTTP timed out on \"%s\"\n" % (url,))
+            continue
+        except socket.timeout as e:
+            sys.stderr.write(" *** TCP timed out on \"%s\"\n" % (url,))
             continue
 
         for e in whoseip(ip, "OrgAbuseEmail"):
@@ -239,6 +243,7 @@ def main(argv):
     all_emails = read_sent_emails(sent_name)
     ready_emails = {}
     page = 1
+    page_sender_count = 0
     while True:
         shodan_limits = info_shodan(debuglevel=debuglevel)
         sys.stderr.write("Shodan limits:\n%s\n" % (pformat(shodan_limits),))
@@ -251,6 +256,12 @@ def main(argv):
         infected_hosts = tuple((ip_address(match["ip"]), match["product"], match["port"], not not match.get("ssl")) for match in shodan_results["matches"])
         filter_hosts(infected_hosts, prodfilter, component, testing, myaddr, ready_emails, all_emails)
         page += 1
+        page_sender_count += 1
+        if page_sender_count == SEND_PAGES:
+            send_mail(ready_emails)
+            write_sent_emails(sent_name, all_emails)
+            ready_emails = {}
+            page_sender_count = 0
 
     send_mail(ready_emails)
     write_sent_emails(sent_name, all_emails)
