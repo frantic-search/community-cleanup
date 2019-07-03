@@ -120,7 +120,7 @@ def write_sent_emails(sent_name, sent_emails):
             f.write("%s: %s\n" % (e, ", ".join(str(ehost) for ehost in ehosts)))
 
 
-def filter_hosts(infected_hosts, prodfilter, component, testing, myaddr, ready_emails, all_emails, debuglevel=0):
+def filter_hosts(infected_hosts, prodfilter, component, ready_emails, all_emails, debuglevel=0):
     ssl_handler = request.HTTPSHandler(debuglevel=debuglevel, context=ssl._create_unverified_context(), check_hostname=False)
     ssl_opener = request.build_opener(ssl_handler)
 
@@ -184,7 +184,7 @@ def filter_hosts(infected_hosts, prodfilter, component, testing, myaddr, ready_e
         sys.stderr.write("%s: %s\n" % (e, ", ".join(str(page_ehost) for page_ehost in page_ehosts)))
 
 
-def send_mail(ready_emails):
+def send_mail(ready_emails, testing, myaddr, prodfilter):
     sys.stderr.write("\n")
     prodname = prodfilter if prodfilter else "internet thing"
     for e in sorted(ready_emails.keys()):
@@ -254,16 +254,16 @@ def main(argv):
         if numhosts == 0:
             break
         infected_hosts = tuple((ip_address(match["ip"]), match["product"], match["port"], not not match.get("ssl")) for match in shodan_results["matches"])
-        filter_hosts(infected_hosts, prodfilter, component, testing, myaddr, ready_emails, all_emails)
+        filter_hosts(infected_hosts, prodfilter, component, ready_emails, all_emails)
         page += 1
         page_sender_count += 1
         if page_sender_count == SEND_PAGES:
-            send_mail(ready_emails)
+            send_mail(ready_emails, testing, myaddr, prodfilter)
             write_sent_emails(sent_name, all_emails)
             ready_emails = {}
             page_sender_count = 0
 
-    send_mail(ready_emails)
+    send_mail(ready_emails, testing, myaddr, prodfilter)
     write_sent_emails(sent_name, all_emails)
 
 if __name__ == "__main__":
