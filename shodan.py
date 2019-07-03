@@ -28,12 +28,12 @@ class Usage(SystemExit):
         super(Usage, self).__init__(__doc__.format(script=os.path.basename(__file__)))
 
 
-def search_shodan(**kwargs):
+def search_shodan(page, **kwargs):
     with open(os.path.expanduser("~/.shodan")) as f:
         shodan_key = f.read().strip()
 
     query = "http.component:{component} country:{country}".format(**kwargs)
-    sys.stderr.write("Inquiring shodan.io with a query %s...\n" % (query,))
+    sys.stderr.write("Inquiring shodan.io with \"%s\" (page %d)...\n" % (query, page,))
 
     handler = request.HTTPSHandler(debuglevel=kwargs.get("debuglevel", 0))
     opener = request.build_opener(handler)
@@ -71,17 +71,9 @@ def whoseip(ip, prop):
     return propvalues
 
 
-def send_notifications(infected_hosts, prodfilter, component, testing, myaddr, cache_name, debuglevel=0):
-    ssl_handler = request.HTTPSHandler(debuglevel=debuglevel, context=ssl._create_unverified_context(), check_hostname=False)
-    ssl_opener = request.build_opener(ssl_handler)
-
-    plain_handler = request.HTTPHandler(debuglevel=debuglevel)
-    plain_opener = request.build_opener(plain_handler)
-
-    componentfilter = component.lower()
-
-    cached_emails = {}
-    with open(os.path.expanduser(cache_name)) as f:
+def read_sent_emails(sent_name):
+    sent_emails = {}
+    with open(os.path.expanduser(sent_name)) as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -94,9 +86,28 @@ def send_notifications(infected_hosts, prodfilter, component, testing, myaddr, c
                 if ipstr.endswith(","):
                     ipstr = ipstr[:-1]
                 ips.append(ip_address(ipstr))
-            cached_emails[email] = ips
+            sent_emails[email] = ips
+    return sent_emails
 
-    emails = {}
+
+def write_sent_emails(sent_name, sent_emails):
+    with open(os.path.expanduser(sent_name), "w") as f:
+        for e in sorted(sent_emails.keys()):
+            ehosts = sent_emails[e]
+            ehosts.sort()
+            f.write("%s: %s\n" % (e, ", ".join(str(ehost) for ehost in ehosts)))
+
+
+def filter_hosts(infected_hosts, prodfilter, component, testing, myaddr, ready_emails, all_emails, debuglevel=0):
+    ssl_handler = request.HTTPSHandler(debuglevel=debuglevel, context=ssl._create_unverified_context(), check_hostname=False)
+    ssl_opener = request.build_opener(ssl_handler)
+
+    plain_handler = request.HTTPHandler(debuglevel=debuglevel)
+    plain_opener = request.build_opener(plain_handler)
+
+    componentfilter = component.lower()
+
+    page_emails = {}
 
     for (ip, product, port, is_ssl) in infected_hosts:
         sys.stderr.write("%s\n" % (ip,))
@@ -130,24 +141,30 @@ def send_notifications(infected_hosts, prodfilter, component, testing, myaddr, c
 
         for e in whoseip(ip, "OrgAbuseEmail"):
             sys.stderr.write("  %s\n" % (e,))
-            ehosts = emails.get(e, [])
-            cached_ehosts = cached_emails.get(e, [])
-            if (ip not in ehosts) and (ip not in cached_ehosts):
-                ehosts.append(ip)
-                emails[e] = ehosts
-                cached_ehosts.append(ip)
-                cached_emails[e] = cached_ehosts
+            page_ehosts = page_emails.get(e, [])
+            ready_ehosts = ready_emails.get(e, [])
+            all_ehosts = all_emails.get(e, [])
+            if ip not in all_ehosts:
+                page_ehosts.append(ip)
+                ready_ehosts.append(ip)
+                all_ehosts.append(ip)
+                page_emails[e] = page_ehosts
+                ready_emails[e] = ready_ehosts
+                all_emails[e] = all_ehosts
 
     sys.stderr.write("\n")
-    for e in emails:
-        ehosts = emails[e]
-        ehosts.sort()
-        sys.stderr.write("%s: %s\n" % (e, ", ".join(str(ehost) for ehost in ehosts)))
+    for e in sorted(page_emails.keys()):
+        page_ehosts = page_emails[e]
+        page_ehosts.sort()
+        sys.stderr.write("%s: %s\n" % (e, ", ".join(str(page_ehost) for page_ehost in page_ehosts)))
 
+
+def send_mail(ready_emails):
+    sys.stderr.write("\n")
     prodname = prodfilter if prodfilter else "internet thing"
-    for e in sorted(emails.keys()):
+    for e in sorted(ready_emails.keys()):
         sys.stderr.write("Sending email to %s...\n" % (e,))
-        ehosts = emails[e]
+        ehosts = ready_emails[e]
         msg = MIMEText("""
 Hello %s,
 
@@ -170,12 +187,6 @@ https://github.com/ilatypov/community-cleanup
         s = smtplib.SMTP("localhost")
         s.sendmail(myaddr, recipients, msg.as_string())
         s.quit()
-
-    with open(os.path.expanduser(cache_name), "w") as f:
-        for e in sorted(cached_emails.keys()):
-            ehosts = cached_emails[e]
-            ehosts.sort()
-            f.write("%s: %s\n" % (e, ", ".join(str(ehost) for ehost in ehosts)))
 
 
 def main(argv):
@@ -201,13 +212,24 @@ def main(argv):
         prodfilter = None
     else:
         raise Usage()
-    myaddr = "{USER}@{HOSTNAME}".format(USER=os.environ["USER"], HOSTNAME=socket.gethostname())
-    shodan_results = search_shodan(component=component, country=country, prodfilter=prodfilter, debuglevel=debuglevel)
-    sys.stderr.write("Found matches: {numhosts}\n".format(numhosts=len(shodan_results["matches"])))
-    infected_hosts = tuple((ip_address(match["ip"]), match["product"], match["port"], not not match.get("ssl")) for match in shodan_results["matches"])
-    cache_name = "email-hosts.txt"
-    send_notifications(infected_hosts, prodfilter, component, testing, myaddr, cache_name)
 
+    myaddr = "{USER}@{HOSTNAME}".format(USER=os.environ["USER"], HOSTNAME=socket.gethostname())
+    sent_name = "email-hosts.txt"
+    all_emails = read_sent_emails(sent_name)
+    ready_emails = {}
+    page = 1
+    while True:
+        shodan_results = search_shodan(page, component=component, country=country, prodfilter=prodfilter, debuglevel=debuglevel)
+        numhosts = len(shodan_results["matches"])
+        sys.stderr.write("Found matches: {numhosts}\n".format(numhosts=numhosts))
+        if numhosts == 0:
+            break
+        infected_hosts = tuple((ip_address(match["ip"]), match["product"], match["port"], not not match.get("ssl")) for match in shodan_results["matches"])
+        filter_hosts(infected_hosts, prodfilter, component, testing, myaddr, ready_emails, all_emails)
+        page += 1
+
+    send_mail(ready_emails)
+    write_sent_emails(sent_name, all_emails)
 
 if __name__ == "__main__":
     import sys
