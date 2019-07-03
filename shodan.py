@@ -184,7 +184,7 @@ def filter_hosts(infected_hosts, prodfilter, component, ready_emails, all_emails
         sys.stderr.write("%s: %s\n" % (e, ", ".join(str(page_ehost) for page_ehost in page_ehosts)))
 
 
-def send_mail(ready_emails, testing, myaddr, prodfilter):
+def send_mail(ready_emails, testing, myaddr, component, prodfilter):
     sys.stderr.write("\n")
     prodname = prodfilter if prodfilter else "internet thing"
     for e in sorted(ready_emails.keys()):
@@ -258,12 +258,12 @@ def main(argv):
         page += 1
         page_sender_count += 1
         if page_sender_count == SEND_PAGES:
-            send_mail(ready_emails, testing, myaddr, prodfilter)
+            send_mail(ready_emails, testing, myaddr, component, prodfilter)
             write_sent_emails(sent_name, all_emails)
             ready_emails = {}
             page_sender_count = 0
 
-    send_mail(ready_emails, testing, myaddr, prodfilter)
+    send_mail(ready_emails, testing, myaddr, component, prodfilter)
     write_sent_emails(sent_name, all_emails)
 
 if __name__ == "__main__":
