@@ -14,6 +14,7 @@ from urllib import request, parse
 from urllib.error import HTTPError, URLError
 import ssl
 import json
+from pprint import pformat
 from ipaddress import ip_address
 import struct, socket, sys, os
 import smtplib
@@ -26,6 +27,25 @@ ANICHOST = "whois.arin.net"
 class Usage(SystemExit):
     def __init__(self):
         super(Usage, self).__init__(__doc__.format(script=os.path.basename(__file__)))
+
+
+def info_shodan(**kwargs):
+    with open(os.path.expanduser("~/.shodan")) as f:
+        shodan_key = f.read().strip()
+
+    sys.stderr.write("Inquiring shodan.io on API usage limits...\n")
+
+    handler = request.HTTPSHandler(debuglevel=kwargs.get("debuglevel", 0))
+    opener = request.build_opener(handler)
+
+    with opener.open(request.Request("https://api.shodan.io/api-info",
+        parse.urlencode((
+                ("key", shodan_key),
+            )).encode("ascii"))) as response:
+        if response.getcode() != 200:
+            raise ValueError("Unexpected HTTP response code {code}".format(code=response.getcode()))
+        shodan_results = json.loads(response.read().decode("utf-8"))
+    return shodan_results
 
 
 def search_shodan(page, **kwargs):
@@ -42,6 +62,7 @@ def search_shodan(page, **kwargs):
         parse.urlencode((
                 ("key", shodan_key),
                 ("query", query),
+                ("page", page),
             )).encode("ascii"))) as response:
         if response.getcode() != 200:
             raise ValueError("Unexpected HTTP response code {code}".format(code=response.getcode()))
@@ -219,6 +240,9 @@ def main(argv):
     ready_emails = {}
     page = 1
     while True:
+        shodan_limits = info_shodan(debuglevel=debuglevel)
+        sys.stderr.write("Shodan limits:\n%s\n" % (pformat(shodan_limits),))
+
         shodan_results = search_shodan(page, component=component, country=country, prodfilter=prodfilter, debuglevel=debuglevel)
         numhosts = len(shodan_results["matches"])
         sys.stderr.write("Found matches: {numhosts}\n".format(numhosts=numhosts))
