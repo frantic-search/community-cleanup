@@ -116,7 +116,6 @@ def write_sent_emails(sent_name, sent_emails):
     with open(os.path.expanduser(sent_name), "w") as f:
         for e in sorted(sent_emails.keys()):
             ehosts = sent_emails[e]
-            ehosts.sort()
             f.write("%s: %s\n" % (e, ", ".join(str(ehost) for ehost in ehosts)))
 
 
@@ -182,6 +181,14 @@ def filter_hosts(infected_hosts, prodfilter, component, ready_emails, all_emails
         page_ehosts = page_emails[e]
         page_ehosts.sort()
         sys.stderr.write("%s: %s\n" % (e, ", ".join(str(page_ehost) for page_ehost in page_ehosts)))
+
+    for e in sorted(ready_emails.keys()):
+        ready_ehosts = ready_emails[e]
+        ready_ehosts.sort()
+
+    for e in sorted(all_emails.keys()):
+        all_ehosts = all_emails[e]
+        all_ehosts.sort()
 
 
 def send_mail(ready_emails, testing, myaddr, component, prodfilter):
