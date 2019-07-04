@@ -14,6 +14,7 @@ from urllib import request, parse
 from urllib.error import HTTPError, URLError
 import ssl
 import json
+import time
 from pprint import pformat
 from ipaddress import ip_address
 import struct, socket, sys, os
@@ -21,12 +22,32 @@ import smtplib
 from email.mime.text import MIMEText
 
 
-SEND_PAGES = 1
+SEND_PAGES = 3
 
 
 class Usage(SystemExit):
     def __init__(self):
         super(Usage, self).__init__(__doc__.format(script=os.path.basename(__file__)))
+
+
+def process_http_error(e):
+    body = e.read().decode("utf-8", errors="replace")
+    sys.stderr.write("  *** HTTP response to {url}: code {code}, body {body!r}...\n".format(url=e.geturl(), 
+            code=e.getcode(), body=body[:20]))
+    return body
+
+
+URL_TIMEOUT = 5
+REPEAT_SLEEP = 5
+NETWORK_ERRORS = (socket.timeout, ConnectionRefusedError, ConnectionResetError, URLError, OSError)
+def log_network_error(e, url):
+    sys.stderr.write("  *** Low-level HTTP, TCP or socket error \"{classname}\" on \"{url}\"\n".format(classname=e.__class__.__name__, 
+        url=url))
+
+
+def sleep_with_banner(repeatsleep):
+    sys.stderr.write("  *** Repeating in {repeatsleep}s...\n".format(repeatsleep=repeatsleep))
+    time.sleep(repeatsleep)
 
 
 def info_shodan(**kwargs):
@@ -38,14 +59,23 @@ def info_shodan(**kwargs):
     handler = request.HTTPSHandler(debuglevel=kwargs.get("debuglevel", 0))
     opener = request.build_opener(handler)
 
-    with opener.open(request.Request("https://api.shodan.io/api-info",
-        parse.urlencode((
-                ("key", shodan_key),
-            )).encode("ascii"))) as response:
-        if response.getcode() != 200:
-            raise ValueError("Unexpected HTTP response code {code}".format(code=response.getcode()))
-        shodan_results = json.loads(response.read().decode("utf-8"))
-    return shodan_results
+    repeatsleep = kwargs.get("repeatsleep", REPEAT_SLEEP)
+    url = "https://api.shodan.io/api-info"
+    while True:
+        try:
+            with opener.open(request.Request(url,
+                parse.urlencode((
+                        ("key", shodan_key),
+                    )).encode("ascii")), timeout=URL_TIMEOUT) as response:
+                if response.getcode() != 200:
+                    body = process_http_error(response)
+                else:
+                    return json.loads(response.read().decode("utf-8"))
+        except HTTPError as e:
+            body = process_http_error(e)
+        except NETWORK_ERRORS as e:
+            log_network_error(e, url)
+        sleep_with_banner(repeatsleep)
 
 
 def search_shodan(page, **kwargs):
@@ -58,16 +88,25 @@ def search_shodan(page, **kwargs):
     handler = request.HTTPSHandler(debuglevel=kwargs.get("debuglevel", 0))
     opener = request.build_opener(handler)
 
-    with opener.open(request.Request("https://api.shodan.io/shodan/host/search",
-        parse.urlencode((
-                ("key", shodan_key),
-                ("query", query),
-                ("page", page),
-            )).encode("ascii"))) as response:
-        if response.getcode() != 200:
-            raise ValueError("Unexpected HTTP response code {code}".format(code=response.getcode()))
-        shodan_results = json.loads(response.read().decode("utf-8"))
-    return shodan_results
+    repeatsleep = kwargs.get("repeatsleep", REPEAT_SLEEP)
+    url = "https://api.shodan.io/shodan/host/search"
+    while True:
+        try:
+            with opener.open(request.Request(url,
+                parse.urlencode((
+                        ("key", shodan_key),
+                        ("query", query),
+                        ("page", page),
+                    )).encode("ascii")), timeout=URL_TIMEOUT) as response:
+                if response.getcode() != 200:
+                    body = process_http_error(response)
+                else:
+                    return json.loads(response.read().decode("utf-8"))
+        except HTTPError as e:
+            body = process_http_error(e)
+        except NETWORK_ERRORS as e:
+            log_network_error(e, url)
+        sleep_with_banner(repeatsleep)
 
 
 def whoseip(ip, whoserole, debuglevel=0):
@@ -163,23 +202,18 @@ def filter_hosts(infected_hosts, prodfilter, component, ready_emails, all_emails
             url = "http://%s:%s/" % (ip, port)
 
         try:
-            with opener.open(url, timeout=5) as response:
-                html = response.read().decode("utf-8", errors="replace")
-                if componentfilter not in html.lower():
-                    sys.stderr.write(" *** HTML %r... at %s does not show \"%s\"\n" % (html[:20],
-                        url, componentfilter))
+            with opener.open(url, timeout=URL_TIMEOUT) as response:
+                body = response.read().decode("utf-8", errors="replace")
+                if componentfilter not in body.lower():
+                    sys.stderr.write("  *** (no \"%s\" in the %s body %r...)\n" % (componentfilter, url, body[:20]))
                     continue
         except HTTPError as e:
-            html = e.read().decode("utf-8", errors="replace")
-            if componentfilter not in html.lower():
-                sys.stderr.write(" *** HTML %r... at %s does not show \"%s\" and responds with code %s\n" % (html[:20],
-                    url, componentfilter, e.code))
+            body = process_http_error(e)
+            if componentfilter not in body.lower():
+                sys.stderr.write("  *** Response does not have \"%s\"\n" % (componentfilter,))
                 continue
-        except URLError as e:
-            sys.stderr.write(" *** HTTP timed out on \"%s\"\n" % (url,))
-            continue
-        except socket.timeout as e:
-            sys.stderr.write(" *** TCP timed out on \"%s\"\n" % (url,))
+        except NETWORK_ERRORS as e:
+            log_network_error(e, url)
             continue
 
         for e in whoseip(ip, "abuse"):
