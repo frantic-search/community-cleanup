@@ -21,7 +21,7 @@ import smtplib
 from email.mime.text import MIMEText
 
 
-SEND_PAGES = 3
+SEND_PAGES = 1
 
 
 class Usage(SystemExit):
