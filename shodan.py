@@ -21,9 +21,8 @@ import smtplib
 from email.mime.text import MIMEText
 
 
-ANICHOST = "whois.arin.net"
-
 SEND_PAGES = 3
+
 
 class Usage(SystemExit):
     def __init__(self):
@@ -71,26 +70,46 @@ def search_shodan(page, **kwargs):
     return shodan_results
 
 
-def whoseip(ip, prop):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(10)
-    s.connect((ANICHOST, 43))
-    s.send(("n + %s\r\n" % (ip,)).encode("utf-8"))
-    r = []
-    while True:
-        d = s.recv(4096)
-        if not d:
-            break
-        r.append(d)
-    s.close()
-    resp = b"".join(r).decode("utf-8")
-    propheader = "%s:" % (prop,)
-    propvalues = []
-    for line in resp.splitlines():
-        if line.startswith(propheader):
-            propvalue = line.split(None, 1)[1].strip()
-            propvalues.append(propvalue)
-    return propvalues
+def whoseip(ip, whoserole, debuglevel=0):
+    r"""
+    Obtain email addresses of a given role for the given IP address.
+
+    >>> whoseip('71.17.138.152', 'abuse')
+    ['abuse@sasktel.net']
+
+    >>> whoseip('109.87.56.48', 'abuse')
+    ['noc@triolan.com']
+
+    >>> whoseip('76.67.127.81', 'abuse')
+    ['abuse@sympatico.ca', 'abuse@bell.ca']
+    """
+
+    def get_roles_addresses(entities):
+        er = [(e.get("roles", []), 
+                dict([(k, v) for (k, obj, kind, v) in e.get("vcardArray", [None, []])[1]]))
+            for e in entities]
+        for e in entities:
+            if "entities" in e:
+                er.extend(get_roles_addresses(e["entities"]))
+        return er
+
+    handler = request.HTTPSHandler(debuglevel=debuglevel)
+    opener = request.build_opener(handler)
+
+    emails = []
+    with opener.open(request.Request("https://rdap.arin.net/bootstrap/ip/%s" % (ip,))) as response:
+        r = json.loads(response.read().decode("utf-8"))
+        try:
+            entroles = get_roles_addresses(r["entities"])
+        except (KeyError, IndexError) as e:
+            sys.stderr.write("  *** %s %s in %s\n" % (e.__class__.__name__, 
+                    e, pformat(r)))
+            return emails
+        for roles, addr in entroles:
+            if whoserole in roles:
+                if "email" in addr:
+                    emails.append(addr["email"])
+    return emails
 
 
 def read_sent_emails(sent_name):
@@ -163,7 +182,7 @@ def filter_hosts(infected_hosts, prodfilter, component, ready_emails, all_emails
             sys.stderr.write(" *** TCP timed out on \"%s\"\n" % (url,))
             continue
 
-        for e in whoseip(ip, "OrgAbuseEmail"):
+        for e in whoseip(ip, "abuse"):
             sys.stderr.write("  %s\n" % (e,))
             page_ehosts = page_emails.get(e, [])
             ready_ehosts = ready_emails.get(e, [])
@@ -222,28 +241,38 @@ https://github.com/ilatypov/community-cleanup
 
 
 def main(argv):
-    if len(argv) < 2:
-        raise Usage()
+    unittesting = False
+    debuglevel = 0
+    testing = False
     i = 1
-    if argv[i] == "-d":
-        debuglevel = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "-d":
+            debuglevel = 1
+        elif arg == "-t":
+            testing = True
+        elif arg == "-u":
+            unittesting = True
+        elif arg.startswith("-"):
+            raise Usage()
+        else:
+            break
         i += 1
-    else:
-        debuglevel = 0
-    if argv[i] == "-t":
-        testing = True
-        i += 1
-    else:
-        testing = False
+    if unittesting:
+        import doctest
+        (failures, tests) = doctest.testmod(verbose=(not not debuglevel))
+        raise SystemExit(0 if failures == 0 else 1 + (failures % 127))
     if len(argv) < i + 2:
         raise Usage()
     (component, country) = argv[i:i + 2]
-    if len(argv) == i + 3:
-        prodfilter = argv[i + 2].lower()
-    elif len(argv) < i + 3:
+    i += 2
+    if len(argv) < i + 1:
         prodfilter = None
     else:
-        raise Usage()
+        prodfilter = argv[i].lower()
+        i += 1
+        if len(argv) >= i + 1:
+            raise Usage()
 
     myaddr = "{USER}@{HOSTNAME}".format(USER=os.environ["USER"], HOSTNAME=socket.gethostname())
     sent_name = "email-hosts.txt"
