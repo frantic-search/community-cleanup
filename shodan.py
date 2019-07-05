@@ -30,10 +30,17 @@ class Usage(SystemExit):
         super(Usage, self).__init__(__doc__.format(script=os.path.basename(__file__)))
 
 
-def process_http_error(e):
-    body = e.read().decode("utf-8", errors="replace")
-    sys.stderr.write("  *** HTTP response to {url}: code {code}, body {body!r}...\n".format(url=e.geturl(), 
-            code=e.getcode(), body=body[:20]))
+def process_http_error(e, quiet=False):
+    try:
+        body = e.read().decode("utf-8", errors="replace")
+    except (HTTPError,) + NETWORK_ERRORS as e2:
+        body = ""
+        sys.stderr.write("  *** HTTP response to {url}: code {code}, body unavailable due to {classname}\n".format(url=e.geturl(),
+                code=e.getcode(), classname=e2.__class__.__name__))
+    else:
+        if not quiet:
+            sys.stderr.write("  *** HTTP response to {url}: code {code}, body {body!r}...\n".format(url=e.geturl(), 
+                    code=e.getcode(), body=body[:20]))
     return body
 
 
@@ -41,7 +48,7 @@ URL_TIMEOUT = 5
 REPEAT_SLEEP = 5
 NETWORK_ERRORS = (socket.timeout, ConnectionRefusedError, ConnectionResetError, URLError, OSError)
 def log_network_error(e, url):
-    sys.stderr.write("  *** Low-level HTTP, TCP or socket error \"{classname}\" on \"{url}\"\n".format(classname=e.__class__.__name__, 
+    sys.stderr.write("  *** Network {classname} with {url}\n".format(classname=e.__class__.__name__,
         url=url))
 
 
@@ -192,7 +199,7 @@ def filter_hosts(infected_hosts, prodfilter, component, ready_emails, all_emails
         sys.stderr.write("%s\n" % (ip,))
         if prodfilter:
             if prodfilter not in product.lower():
-                sys.stderr.write("  *** %s\n" % (product,))
+                sys.stderr.write("  *** Missing product in %r\n" % (product,))
                 continue
         if is_ssl:
             opener = ssl_opener
@@ -205,10 +212,10 @@ def filter_hosts(infected_hosts, prodfilter, component, ready_emails, all_emails
             with opener.open(url, timeout=URL_TIMEOUT) as response:
                 body = response.read().decode("utf-8", errors="replace")
                 if componentfilter not in body.lower():
-                    sys.stderr.write("  *** (no \"%s\" in the %s body %r...)\n" % (componentfilter, url, body[:20]))
+                    sys.stderr.write("  *** Missing component in %s showing %r...\n" % (url, body[:20],))
                     continue
         except HTTPError as e:
-            body = process_http_error(e)
+            body = process_http_error(e, True)
             if componentfilter not in body.lower():
                 sys.stderr.write("  *** Response does not have \"%s\"\n" % (componentfilter,))
                 continue
@@ -216,7 +223,9 @@ def filter_hosts(infected_hosts, prodfilter, component, ready_emails, all_emails
             log_network_error(e, url)
             continue
 
+        found_emails = False
         for e in whoseip(ip, "abuse"):
+            found_emails = True
             sys.stderr.write("  %s\n" % (e,))
             page_ehosts = page_emails.get(e, [])
             ready_ehosts = ready_emails.get(e, [])
@@ -228,6 +237,9 @@ def filter_hosts(infected_hosts, prodfilter, component, ready_emails, all_emails
                 page_emails[e] = page_ehosts
                 ready_emails[e] = ready_ehosts
                 all_emails[e] = all_ehosts
+
+        if not found_emails:
+            sys.stderr.write("  *** No abuse notification emails found\n")
 
     sys.stderr.write("\n")
     for e in sorted(page_emails.keys()):
