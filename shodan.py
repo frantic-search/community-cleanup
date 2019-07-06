@@ -148,6 +148,10 @@ def search_shodan(testing, page, **kwargs):
                     "product": "Avtech AVN801 network camera",
                     "ip": 412990438,
                     "port": 8888
+                }, {
+                    "product": "Avtech AVN801 network camera",
+                    "ip": 2264972081,
+                    "port": 88
                     }]}
         else:
             raise Usage("Only MikroTik and AVTech products are mocked for Shodan")
@@ -254,7 +258,7 @@ def build_httpfilter(macro):
         pass
     elif macro == WEAK_AVTECH:
         avtech_path = "/cgi-bin/nobody/Machine.cgi?action=get_capability"
-        avtech_headers = ((b"Authentication", b"Basic %s" % (base64.b64encode(b"admin:admin"),)),)
+        avtech_headers = ((b"Authorization", b"Basic %s" % (base64.b64encode(b"admin:admin"),)),)
         avtech_bodysearch = "Firmware.Version"
         httpfilter.append((avtech_path, (), avtech_bodysearch))
         httpfilter.append((avtech_path, avtech_headers, avtech_bodysearch))
@@ -281,19 +285,19 @@ def check(httpfilter, baseurl, opener):
             body = process_http_error(e, True)
         except NETWORK_ERRORS as e:
             log_network_error(e, url)
-            break
+            return False
 
         if bodysearch in body:
             sys.stderr.write("  Got {bodysearch!r} in {url}{headersinfo}\n".format(bodysearch=bodysearch, 
                 url=url,
-                headersinfo=(" with %s" % (headers[0][0],) if len(headers) > 0 else "")))
+                headersinfo=(" with %s" % (headers[0][0].decode("ascii"),) if len(headers) > 0 else "")))
             return True
     
-    # sys.stderr.write("  *** The product appears protected at %s\n" % (baseurl,))
+    sys.stderr.write("  *** The product appears protected at %s\n" % (baseurl,))
     return False
 
 
-def filter_hosts(infected_hosts, httpfilter, ready_emails, all_emails, debuglevel=0):
+def filter_hosts(testing, infected_hosts, httpfilter, ready_emails, all_emails, debuglevel=0):
     ssl_handler = request.HTTPSHandler(debuglevel=debuglevel, context=ssl._create_unverified_context(), check_hostname=False)
     ssl_opener = request.build_opener(ssl_handler)
 
@@ -329,8 +333,6 @@ def filter_hosts(infected_hosts, httpfilter, ready_emails, all_emails, debugleve
 
             if not found_emails:
                 sys.stderr.write("  *** No abuse notification emails found\n")
-        else:
-            sys.stderr.write("  *** The product appears protected at %s\n" % (url,))
 
     sys.stderr.write("\n")
     for e in sorted(page_emails.keys()):
@@ -353,7 +355,7 @@ def send_mail(testing, ready_emails, myaddr, product, component, macro):
     if component:
         vulnerability = "running \"%s\"" % (component,)
     elif macro == WEAK_AVTECH:
-        vulnerability = "missing or factory-defined authentication"
+        vulnerability = "known exploits or factory-defined authentication"
     else:
         vulnerability = "flagged by a macro %s" % (macro,)
     for e in sorted(ready_emails.keys()):
@@ -379,7 +381,8 @@ https://github.com/ilatypov/community-cleanup
         recipients = [myaddr]
         if not testing:
             recipients.append(e)
-        msg["Subject"] = "Community cleanup: your %s needs attention" % (prodname,)
+        msg["Subject"] = "%sCommunity cleanup: your %s needs attention" % ("TESTING: " if testing else "",
+                prodname,)
         msg["From"] = myaddr
         msg["To"] = e
         s = smtplib.SMTP("localhost")
@@ -452,7 +455,7 @@ def main(argv):
             break
         infected_hosts = tuple((ip_address(match["ip"]), match["port"], not not match.get("ssl")) for match in shodan_results["matches"])
 
-        filter_hosts(infected_hosts, httpfilter, ready_emails, all_emails)
+        filter_hosts(testing, infected_hosts, httpfilter, ready_emails, all_emails, debuglevel=debuglevel)
         page += 1
         page_sender_count += 1
         if page_sender_count == SEND_PAGES:
