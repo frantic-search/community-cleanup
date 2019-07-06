@@ -1,19 +1,23 @@
 #! /usr/bin/python3
 # vim: et:ts=4:sts=4:sw=4:fileencoding=utf-8
 r"""
+Usage:
 
-    Usage: {script} [-t] COMPONENT COUNTRY [PRODUCT]
+    {script} [-t] [--product PRODUCT] [--country COUNTRY] [--component COMPONENT] [--macro MACRO]
 
 e.g.,
 
-    {script} -t coinhive CA mikrotik
+    {script} -t --product MikroTik --country CA --component coinhive
 
+    {script} -t --product AVTech --country CA --macro {WEAK_AVTECH}
+{message}
 """
 
 from urllib import request, parse
 from urllib.error import HTTPError, URLError
 import ssl
 import json
+import base64
 import time
 from pprint import pformat
 from ipaddress import ip_address
@@ -23,11 +27,14 @@ from email.mime.text import MIMEText
 
 
 SEND_PAGES = 3
+WEAK_AVTECH = "weak_avtech"
 
 
 class Usage(SystemExit):
-    def __init__(self):
-        super(Usage, self).__init__(__doc__.format(script=os.path.basename(__file__)))
+    def __init__(self, message=None):
+        super(Usage, self).__init__(__doc__.format(script=os.path.basename(__file__),
+            WEAK_AVTECH=WEAK_AVTECH,
+            message=("\nError: %s\n" % (message,) if message else "")))
 
 
 def process_http_error(e, quiet=False):
@@ -57,10 +64,7 @@ def sleep_with_banner(repeatsleep):
     time.sleep(repeatsleep)
 
 
-def info_shodan(**kwargs):
-    with open(os.path.expanduser("~/.shodan")) as f:
-        shodan_key = f.read().strip()
-
+def info_shodan(testing, **kwargs):
     sys.stderr.write("Inquiring shodan.io on API usage limits...\n")
 
     handler = request.HTTPSHandler(debuglevel=kwargs.get("debuglevel", 0))
@@ -68,6 +72,23 @@ def info_shodan(**kwargs):
 
     repeatsleep = kwargs.get("repeatsleep", REPEAT_SLEEP)
     url = "https://api.shodan.io/api-info"
+
+    if testing:
+        return {"https": False,
+			 "monitored_ips": 8586,
+			 "plan": "dev",
+			 "query_credits": 10,
+			 "scan_credits": 100,
+			 "telnet": False,
+			 "unlocked": True,
+			 "unlocked_left": 10,
+			 "usage_limits": {"monitored_ips": 16,
+							  "query_credits": 100,
+							  "scan_credits": 100}}
+
+    with open(os.path.expanduser("~/.shodan")) as f:
+        shodan_key = f.read().strip()
+
     while True:
         try:
             with opener.open(request.Request(url,
@@ -85,11 +106,17 @@ def info_shodan(**kwargs):
         sleep_with_banner(repeatsleep)
 
 
-def search_shodan(page, **kwargs):
-    with open(os.path.expanduser("~/.shodan")) as f:
-        shodan_key = f.read().strip()
-
-    query = "http.component:{component} country:{country}".format(**kwargs)
+def search_shodan(testing, page, **kwargs):
+    argsmap = (
+            ("product", "product"),
+            ("component", "http.component"),
+            ("country", "country"),
+        )
+    queryargs = []
+    for (funcarg, shodanarg) in argsmap:
+        if kwargs.get(funcarg) is not None:
+            queryargs.append("{key}:{value}".format(key=shodanarg, value=kwargs[funcarg].lower()))
+    query = " ".join(queryargs)
     sys.stderr.write("Inquiring shodan.io with \"%s\" (page %d)...\n" % (query, page,))
 
     handler = request.HTTPSHandler(debuglevel=kwargs.get("debuglevel", 0))
@@ -97,6 +124,37 @@ def search_shodan(page, **kwargs):
 
     repeatsleep = kwargs.get("repeatsleep", REPEAT_SLEEP)
     url = "https://api.shodan.io/shodan/host/search"
+
+    if testing:
+        if page > 1:
+            return {"matches": []}
+
+        if kwargs.get("product", "").lower() == "mikrotik":
+            return {"matches": [{
+                        "product": "MikroTik http proxy",
+                        "ip": 2917626385,
+                        "port": 8080
+                        }, {
+                        "product": "MikroTik http proxy",
+                        "ip": 3494743649,
+                        "port": 8080
+                        }]}
+        elif kwargs.get("product", "").lower() == "avtech":
+            return {"matches": [{
+                    "product": "Avtech AVN801 network camera",
+                    "ip": 1805602870,
+                    "port": 88
+                }, {
+                    "product": "Avtech AVN801 network camera",
+                    "ip": 412990438,
+                    "port": 8888
+                    }]}
+        else:
+            raise Usage("Only MikroTik and AVTech products are mocked for Shodan")
+
+    with open(os.path.expanduser("~/.shodan")) as f:
+        shodan_key = f.read().strip()
+
     while True:
         try:
             with opener.open(request.Request(url,
@@ -160,86 +218,113 @@ def whoseip(ip, whoserole, debuglevel=0):
 
 def read_sent_emails(sent_name):
     sent_emails = {}
-    with open(os.path.expanduser(sent_name)) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            email, iptext = line.split(None, 1)
-            if email.endswith(":"):
-                email = email[:-1]
-            ips = []
-            for ipstr in iptext.split():
-                if ipstr.endswith(","):
-                    ipstr = ipstr[:-1]
-                ips.append(ip_address(ipstr))
-            sent_emails[email] = ips
+    if os.path.exists(sent_name):
+        with open(os.path.expanduser(sent_name)) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                email, iptext = line.split(None, 1)
+                if email.endswith(":"):
+                    email = email[:-1]
+                ips = []
+                for ipstr in iptext.split():
+                    if ipstr.endswith(","):
+                        ipstr = ipstr[:-1]
+                    ips.append(ip_address(ipstr))
+                sent_emails[email] = ips
     return sent_emails
 
 
-def write_sent_emails(sent_name, sent_emails):
+def write_sent_emails(testing, sent_name, sent_emails):
+    if testing:
+        return
     with open(os.path.expanduser(sent_name), "w") as f:
         for e in sorted(sent_emails.keys()):
             ehosts = sent_emails[e]
             f.write("%s: %s\n" % (e, ", ".join(str(ehost) for ehost in ehosts)))
 
 
-def filter_hosts(infected_hosts, prodfilter, component, ready_emails, all_emails, debuglevel=0):
+def build_httpfilter(macro):
+    httpfilter = []
+    if macro is None:
+        pass
+    elif macro == WEAK_AVTECH:
+        avtech_path = "/cgi-bin/nobody/Machine.cgi?action=get_capability"
+        avtech_headers = ((b"Authentication", b"Basic %s" % (base64.b64encode(b"admin:admin"),)),)
+        avtech_bodysearch = "Firmware.Version"
+        httpfilter.append((avtech_path, (), avtech_bodysearch))
+        httpfilter.append((avtech_path, avtech_headers, avtech_bodysearch))
+    else:
+        raise Usage("Unknown macro \"%s\"" % (macro,))
+    return httpfilter
+
+
+def check(httpfilter, baseurl, opener):
+    if len(httpfilter) == 0:
+        # Assume the host vulnerable in the absence of HTTP checks
+        return True
+
+    for (path_info, headers, bodysearch) in httpfilter:
+        body = ""
+        try:
+            url = baseurl + path_info
+            req = request.Request(url)
+            for (name, value) in headers:
+                req.add_header(name, value)
+            with opener.open(req, timeout=URL_TIMEOUT) as response:
+                body = response.read().decode("utf-8", errors="replace")
+        except HTTPError as e:
+            body = process_http_error(e, True)
+        except NETWORK_ERRORS as e:
+            log_network_error(e, url)
+
+        if bodysearch in body:
+            sys.stderr.write("  *** Got {bodysearch!r} in {url}{headersinfo}\n".format(bodysearch=bodysearch, 
+                url=url,
+                headersinfo=(" with %s".headers[0][0] if len(headers) > 0 else "")))
+            return True
+    
+    # sys.stderr.write("  *** No indication of vulnerabilities in %s...\n" % (url,))
+    return False
+
+
+def filter_hosts(infected_hosts, httpfilter, ready_emails, all_emails, debuglevel=0):
     ssl_handler = request.HTTPSHandler(debuglevel=debuglevel, context=ssl._create_unverified_context(), check_hostname=False)
     ssl_opener = request.build_opener(ssl_handler)
 
     plain_handler = request.HTTPHandler(debuglevel=debuglevel)
     plain_opener = request.build_opener(plain_handler)
 
-    componentfilter = component.lower()
-
     page_emails = {}
 
-    for (ip, product, port, is_ssl) in infected_hosts:
+    for (ip, port, is_ssl) in infected_hosts:
         sys.stderr.write("%s\n" % (ip,))
-        if prodfilter:
-            if prodfilter not in product.lower():
-                sys.stderr.write("  *** Missing product in %r\n" % (product,))
-                continue
         if is_ssl:
+            url = "https://%s:%s" % (ip, port)
             opener = ssl_opener
-            url = "https://%s:%s/" % (ip, port)
         else:
+            url = "http://%s:%s" % (ip, port)
             opener = plain_opener
-            url = "http://%s:%s/" % (ip, port)
 
-        try:
-            with opener.open(url, timeout=URL_TIMEOUT) as response:
-                body = response.read().decode("utf-8", errors="replace")
-                if componentfilter not in body.lower():
-                    sys.stderr.write("  *** Missing component in %s showing %r...\n" % (url, body[:20],))
-                    continue
-        except HTTPError as e:
-            body = process_http_error(e, True)
-            if componentfilter not in body.lower():
-                sys.stderr.write("  *** Response does not have \"%s\"\n" % (componentfilter,))
-                continue
-        except NETWORK_ERRORS as e:
-            log_network_error(e, url)
-            continue
+        if check(httpfilter, url, opener):
+            found_emails = False
+            for e in whoseip(ip, "abuse"):
+                found_emails = True
+                sys.stderr.write("  %s\n" % (e,))
+                page_ehosts = page_emails.get(e, [])
+                ready_ehosts = ready_emails.get(e, [])
+                all_ehosts = all_emails.get(e, [])
+                if ip not in all_ehosts:
+                    page_ehosts.append(ip)
+                    ready_ehosts.append(ip)
+                    all_ehosts.append(ip)
+                    page_emails[e] = page_ehosts
+                    ready_emails[e] = ready_ehosts
+                    all_emails[e] = all_ehosts
 
-        found_emails = False
-        for e in whoseip(ip, "abuse"):
-            found_emails = True
-            sys.stderr.write("  %s\n" % (e,))
-            page_ehosts = page_emails.get(e, [])
-            ready_ehosts = ready_emails.get(e, [])
-            all_ehosts = all_emails.get(e, [])
-            if ip not in all_ehosts:
-                page_ehosts.append(ip)
-                ready_ehosts.append(ip)
-                all_ehosts.append(ip)
-                page_emails[e] = page_ehosts
-                ready_emails[e] = ready_ehosts
-                all_emails[e] = all_ehosts
-
-        if not found_emails:
-            sys.stderr.write("  *** No abuse notification emails found\n")
+            if not found_emails:
+                sys.stderr.write("  *** No abuse notification emails found\n")
 
     sys.stderr.write("\n")
     for e in sorted(page_emails.keys()):
@@ -256,16 +341,26 @@ def filter_hosts(infected_hosts, prodfilter, component, ready_emails, all_emails
         all_ehosts.sort()
 
 
-def send_mail(ready_emails, testing, myaddr, component, prodfilter):
+def send_mail(testing, ready_emails, myaddr, product, component, macro):
     sys.stderr.write("\n")
-    prodname = prodfilter if prodfilter else "internet thing"
+    prodname = product if product else "internet thing"
+    if component:
+        vulnerability = "running \"%s\"" % (component,)
+    elif macro == WEAK_AVTECH:
+        vulnerability = "missing or factory-defined authentication"
+    else:
+        vulnerability = "flagged by a macro %s" % (macro,)
     for e in sorted(ready_emails.keys()):
-        sys.stderr.write("Sending email to %s...\n" % (e,))
+        if testing:
+            sys.stderr.write("Testing email for %s by sending it just to myself...\n" % (e,))
+        else:
+            sys.stderr.write("Sending email to %s...\n" % (e,))
         ehosts = ready_emails[e]
         msg = MIMEText("""
 Hello %s,
 
-Your %s at the following address(es) showed as infected with "%s":
+Your %s at the following address(es) appeared vulnerable to abuse and botnets
+because of %s:
 
   %s
 
@@ -273,7 +368,7 @@ Best regards,
 
 A community cleanup initiative
 https://github.com/ilatypov/community-cleanup
-""" % (e, prodname, component, "\n  ".join(str(ehost) for ehost in ehosts)))
+""" % (e, prodname, vulnerability, "\n  ".join(str(ehost) for ehost in ehosts)))
 
         recipients = [myaddr]
         if not testing:
@@ -286,10 +381,21 @@ https://github.com/ilatypov/community-cleanup
         s.quit()
 
 
+def next_arg(argv, i):
+    i += 1
+    if i >= len(argv):
+        raise Usage()
+    return (i, argv[i])
+
+
 def main(argv):
     unittesting = False
     debuglevel = 0
     testing = False
+    product = None
+    country = None
+    component = None
+    macro = None
     i = 1
     while i < len(argv):
         arg = argv[i]
@@ -299,26 +405,29 @@ def main(argv):
             testing = True
         elif arg == "-u":
             unittesting = True
+        elif arg == "--product":
+            i, product = next_arg(argv, i)
+        elif arg == "--country":
+            i, country = next_arg(argv, i)
+        elif arg == "--component":
+            i, component = next_arg(argv, i)
+        elif arg == "--macro":
+            i, macro = next_arg(argv, i)
         elif arg.startswith("-"):
             raise Usage()
         else:
             break
         i += 1
+
     if unittesting:
         import doctest
         (failures, tests) = doctest.testmod(verbose=(not not debuglevel))
         raise SystemExit(0 if failures == 0 else 1 + (failures % 127))
-    if len(argv) < i + 2:
-        raise Usage()
-    (component, country) = argv[i:i + 2]
-    i += 2
-    if len(argv) < i + 1:
-        prodfilter = None
-    else:
-        prodfilter = argv[i].lower()
-        i += 1
-        if len(argv) >= i + 1:
-            raise Usage()
+
+    if len(list(filter(bool, (product, country, component, macro)))) < 2:
+        raise Usage("The search will benefit from using at least 2 conditions")
+
+    httpfilter = build_httpfilter(macro)
 
     myaddr = "{USER}@{HOSTNAME}".format(USER=os.environ["USER"], HOSTNAME=socket.gethostname())
     sent_name = "email-hosts.txt"
@@ -327,26 +436,28 @@ def main(argv):
     page = 1
     page_sender_count = 0
     while True:
-        shodan_limits = info_shodan(debuglevel=debuglevel)
+        shodan_limits = info_shodan(testing, debuglevel=debuglevel)
         sys.stderr.write("Shodan limits:\n%s\n" % (pformat(shodan_limits),))
 
-        shodan_results = search_shodan(page, component=component, country=country, prodfilter=prodfilter, debuglevel=debuglevel)
+        shodan_results = search_shodan(testing, page, product=product, country=country, component=component, debuglevel=debuglevel)
         numhosts = len(shodan_results["matches"])
         sys.stderr.write("Found matches: {numhosts}\n".format(numhosts=numhosts))
         if numhosts == 0:
             break
-        infected_hosts = tuple((ip_address(match["ip"]), match["product"], match["port"], not not match.get("ssl")) for match in shodan_results["matches"])
-        filter_hosts(infected_hosts, prodfilter, component, ready_emails, all_emails)
+        infected_hosts = tuple((ip_address(match["ip"]), match["port"], not not match.get("ssl")) for match in shodan_results["matches"])
+
+        filter_hosts(infected_hosts, httpfilter, ready_emails, all_emails)
         page += 1
         page_sender_count += 1
         if page_sender_count == SEND_PAGES:
-            send_mail(ready_emails, testing, myaddr, component, prodfilter)
-            write_sent_emails(sent_name, all_emails)
+            send_mail(testing, ready_emails, myaddr, product, component, macro)
+            write_sent_emails(testing, sent_name, all_emails)
             ready_emails = {}
             page_sender_count = 0
 
-    send_mail(ready_emails, testing, myaddr, component, prodfilter)
-    write_sent_emails(sent_name, all_emails)
+    send_mail(testing, ready_emails, myaddr, product, component, macro)
+    write_sent_emails(testing, sent_name, all_emails)
+
 
 if __name__ == "__main__":
     import sys
