@@ -186,6 +186,9 @@ def whoseip(ip, whoserole, debuglevel=0):
 
     >>> whoseip('76.67.127.81', 'abuse')
     ['abuse@sympatico.ca', 'abuse@bell.ca']
+
+    >>> whoseip('24.84.44.189', 'abuse')
+    ['internet.abuse@sjrb.ca']
     """
 
     def get_roles_addresses(entities):
@@ -278,14 +281,15 @@ def check(httpfilter, baseurl, opener):
             body = process_http_error(e, True)
         except NETWORK_ERRORS as e:
             log_network_error(e, url)
+            break
 
         if bodysearch in body:
-            sys.stderr.write("  *** Got {bodysearch!r} in {url}{headersinfo}\n".format(bodysearch=bodysearch, 
+            sys.stderr.write("  Got {bodysearch!r} in {url}{headersinfo}\n".format(bodysearch=bodysearch, 
                 url=url,
-                headersinfo=(" with %s".headers[0][0] if len(headers) > 0 else "")))
+                headersinfo=(" with %s" % (headers[0][0],) if len(headers) > 0 else "")))
             return True
     
-    # sys.stderr.write("  *** No indication of vulnerabilities in %s...\n" % (url,))
+    # sys.stderr.write("  *** The product appears protected at %s\n" % (baseurl,))
     return False
 
 
@@ -325,6 +329,8 @@ def filter_hosts(infected_hosts, httpfilter, ready_emails, all_emails, debugleve
 
             if not found_emails:
                 sys.stderr.write("  *** No abuse notification emails found\n")
+        else:
+            sys.stderr.write("  *** The product appears protected at %s\n" % (url,))
 
     sys.stderr.write("\n")
     for e in sorted(page_emails.keys()):
