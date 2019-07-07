@@ -510,6 +510,9 @@ def main(argv):
     elif numcond < 2:
         raise Usage("The search will benefit from using at least 2 conditions")
 
+    if checkurl and not macro:
+        raise Usage("The --url argument will benefit from using a macro to check it")
+
     httpfilter = build_httpfilter(macro)
 
     myaddr = "{USER}@{HOSTNAME}".format(USER=os.environ["USER"], HOSTNAME=socket.gethostname())
