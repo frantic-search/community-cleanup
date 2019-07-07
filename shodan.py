@@ -3,13 +3,13 @@
 r"""
 Usage:
 
-    {script} [-t] [--product PRODUCT] [--country COUNTRY] [--component COMPONENT] [--macro MACRO]
+    python3 {script} [-t] [--product PRODUCT] [--country COUNTRY] [--component COMPONENT] [--macro MACRO]
 
 e.g.,
 
-    {script} -t --product MikroTik --country CA --component coinhive
+    python3 {script} -t --product MikroTik --country CA --component coinhive --macro {CHECK_COINHIVE}
 
-    {script} -t --product AVTech --country CA --macro {WEAK_AVTECH}
+    python3 {script} -t --product AVTech --country CA --macro {WEAK_AVTECH}
 {message}
 """
 
@@ -27,12 +27,14 @@ from email.mime.text import MIMEText
 
 
 SEND_PAGES = 3
+CHECK_COINHIVE = "check_coinhive"
 WEAK_AVTECH = "weak_avtech"
 
 
 class Usage(SystemExit):
     def __init__(self, message=None):
         super(Usage, self).__init__(__doc__.format(script=os.path.basename(__file__),
+            CHECK_COINHIVE=CHECK_COINHIVE,
             WEAK_AVTECH=WEAK_AVTECH,
             message=("\nError: %s\n" % (message,) if message else "")))
 
@@ -256,6 +258,8 @@ def build_httpfilter(macro):
     httpfilter = []
     if macro is None:
         pass
+    elif macro == CHECK_COINHIVE:
+        httpfilter.append(("/", (), "coinhive"))
     elif macro == WEAK_AVTECH:
         avtech_path = "/cgi-bin/nobody/Machine.cgi?action=get_capability"
         avtech_headers = ((b"Authorization", b"Basic %s" % (base64.b64encode(b"admin:admin"),)),)
@@ -390,6 +394,25 @@ https://github.com/ilatypov/community-cleanup
         s.quit()
 
 
+class AutoFlush:
+    def __init__(self, out):
+        self._out = out
+
+    def write(self, s):
+        self._out.write(s)
+        self._out.flush()
+
+    def __getattr__(self, attrname):
+        return getattr(self._out, attrname)
+
+
+def wrap_once(o, cls):
+    if isinstance(o, cls):
+        return o
+    else:
+        return cls(o)
+
+
 def next_arg(argv, i):
     i += 1
     if i >= len(argv):
@@ -398,6 +421,9 @@ def next_arg(argv, i):
 
 
 def main(argv):
+    sys.stdout = wrap_once(sys.stdout, AutoFlush)
+    sys.stderr = wrap_once(sys.stderr, AutoFlush)
+
     unittesting = False
     debuglevel = 0
     testing = False
