@@ -376,15 +376,30 @@ def filter_hosts(testing, infected_hosts, httpfilter, ready_emails, all_emails, 
         all_ehosts.sort()
 
 
-def send_mail(testing, ready_emails, myaddr, product, component, macro):
-    sys.stderr.write("\n")
-    prodname = product if product else "internet thing"
-    if component:
-        vulnerability = "running \"%s\"" % (component,)
+def extract_thing(shodanquery):
+    pieces = shodanquery.split()
+    thing_pieces = []
+    for piece in pieces:
+        if ":" not in piece:
+            thing_pieces.append(piece)
+    return " ".join(thing_pieces)
+
+
+def send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro):
+    thing = extract_thing(shodanquery)
+    prodname = thing if thing else (
+                product if product else (
+                    "AVTech" if macro == WEAK_AVTECH else "internet thing"
+                    )
+                )
+    if macro == CHECK_COINHIVE:
+        vulnerability = "showing Coinhive"
     elif macro == WEAK_AVTECH:
-        vulnerability = "known exploits or factory-defined authentication"
+        vulnerability = "exhibiting known exploits or factory-defined authentication"
+    elif component:
+        vulnerability = "running \"%s\"" % (component,)
     else:
-        vulnerability = "flagged by a macro %s" % (macro,)
+        vulnerability = None
     for e in sorted(ready_emails.keys()):
         if testing:
             sys.stderr.write("Testing email for %s by sending it just to myself...\n" % (e,))
@@ -394,8 +409,7 @@ def send_mail(testing, ready_emails, myaddr, product, component, macro):
         msg = MIMEText("""
 Hello %s,
 
-Your %s at the following address(es) appeared vulnerable to abuse and botnets
-because of %s:
+Your %s at the following address(es) appeared vulnerable to abuse and botnets%s:
 
   %s
 
@@ -403,7 +417,9 @@ Best regards,
 
 A community cleanup initiative
 https://github.com/ilatypov/community-cleanup
-""" % (e, prodname, vulnerability, "\n  ".join(str(ehost) for ehost in ehosts)))
+""" % (e, prodname,
+    "" if vulnerability is None else "\nbecause of %s" % (vulnerability,),
+    "\n  ".join(str(ehost) for ehost in ehosts)))
 
         recipients = [myaddr]
         if not testing:
@@ -528,7 +544,7 @@ def main(argv):
             page += 1
             page_sender_count += 1
             if page_sender_count == SEND_PAGES:
-                send_mail(testing, ready_emails, myaddr, product, component, macro)
+                send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro)
                 write_sent_emails(testing, sent_name, all_emails)
                 ready_emails = {}
                 page_sender_count = 0
@@ -540,7 +556,7 @@ def main(argv):
                 httpfilter,
                 ready_emails, all_emails, debuglevel=debuglevel)
 
-    send_mail(testing, ready_emails, myaddr, product, component, macro)
+    send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro)
     write_sent_emails(testing, sent_name, all_emails)
 
 
