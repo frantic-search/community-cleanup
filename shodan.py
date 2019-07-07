@@ -3,13 +3,22 @@
 r"""
 Usage:
 
-    python3 {script} [-t] [--product PRODUCT] [--country COUNTRY] [--component COMPONENT] [--macro MACRO]
+    python3 {script} [-t] \
+            [--product PRODUCT] \
+            [--country COUNTRY] \
+            [--component COMPONENT] \
+            [--macro MACRO] \
+            [--url httpX://HOST:PORT]
 
 e.g.,
 
-    python3 {script} -t --product MikroTik --country CA --component coinhive --macro {CHECK_COINHIVE}
+    python3 {script} -t --product MikroTik --country CA \
+            --component coinhive --macro {CHECK_COINHIVE}
 
-    python3 {script} -t --product AVTech --country CA --macro {WEAK_AVTECH}
+    python3 {script} -t --query "country:CA avtech" \
+            --macro {WEAK_AVTECH}
+
+    python3 {script} -t --macro {WEAK_AVTECH} --url http://SUSPECT:PORT
 {message}
 """
 
@@ -20,7 +29,7 @@ import json
 import base64
 import time
 from pprint import pformat
-from ipaddress import ip_address
+from ipaddress import ip_address, IPv4Address, IPv6Address
 import struct, socket, sys, os
 import smtplib
 from email.mime.text import MIMEText
@@ -49,8 +58,8 @@ def process_http_error(e, quiet=False):
                 code=e.getcode(), classname=e2.__class__.__name__))
         code = 0
     else:
-        if ((code < 200) or (code >= 300)) and not quiet:
-            sys.stderr.write("  *** HTTP response to {url}: code {code}, body {body!r}...\n".format(url=e.geturl(), 
+        if ((code < 200) or (code >= 400)) and not quiet:
+            sys.stderr.write("  *** HTTP response to {url}: code {code}, body {body!r}...\n".format(url=e.geturl(),
                     code=e.getcode(), body=body[:20]))
     return (code, body)
 
@@ -72,15 +81,33 @@ def sleep_with_banner(repeatsleep):
     time.sleep(repeatsleep)
 
 
-def info_shodan(testing, **kwargs):
-    sys.stderr.write("Inquiring shodan.io on API usage limits...\n")
-
-    handler = request.HTTPSHandler(debuglevel=kwargs.get("debuglevel", 0))
+def resilient_open(req, timeout=URL_TIMEOUT, repeatsleep=REPEAT_SLEEP, debuglevel=0):
+    url = req.full_url
+    if url.startswith("https:"):
+        handlerclass = request.HTTPSHandler
+    else:
+        handlerclass = request.HTTPHandler
+    handler = handlerclass(debuglevel=debuglevel)
     opener = request.build_opener(handler)
 
-    repeatsleep = kwargs.get("repeatsleep", REPEAT_SLEEP)
-    url = "https://api.shodan.io/api-info"
+    while True:
+        try:
+            with opener.open(req, timeout=timeout) as response:
+                (code, body) = process_http_response(response, True)
+                break
+        except HTTPError as e:
+            (code, body) = process_http_error(e, True)
+            break
+        except NETWORK_ERRORS as e:
+            log_network_error(e, url)
+        sleep_with_banner(repeatsleep)
 
+    return (code, json.loads(body))
+
+
+def info_shodan(testing, **kwargs):
+    url = "https://api.shodan.io/api-info"
+    sys.stderr.write("Inquiring shodan.io on API usage limits...\n")
     if testing:
         return (200, {"https": False,
 			 "monitored_ips": 8586,
@@ -97,48 +124,39 @@ def info_shodan(testing, **kwargs):
     with open(os.path.expanduser("~/.shodan")) as f:
         shodan_key = f.read().strip()
 
-    while True:
-        try:
-            with opener.open(request.Request(url,
-                    parse.urlencode((
-                            ("key", shodan_key),
-                        )).encode("ascii")), timeout=SHODAN_TIMEOUT) as response:
-                (code, body) = process_http_response(response, True)
-                break
-        except HTTPError as e:
-            (code, body) = process_http_error(e, True)
-            break
-        except NETWORK_ERRORS as e:
-            log_network_error(e, url)
-        sleep_with_banner(repeatsleep)
-
-    return (code, json.loads(body))
+    return resilient_open(request.Request(url,
+                parse.urlencode((
+                        ("key", shodan_key),
+                    )).encode("ascii")),
+                timeout=SHODAN_TIMEOUT,
+                repeatsleep=kwargs.get("repeatsleep", REPEAT_SLEEP),
+                debuglevel=kwargs.get("debuglevel", 0))
 
 
 def search_shodan(testing, page, **kwargs):
+    url = "https://api.shodan.io/shodan/host/search"
     argsmap = (
             ("product", "product"),
             ("component", "http.component"),
             ("country", "country"),
         )
-    queryargs = []
+    querypieces = []
+    query = kwargs.get("query")
+    if query is not None:
+        querypieces.append(query)
     for (funcarg, shodanarg) in argsmap:
-        if kwargs.get(funcarg) is not None:
-            queryargs.append("{key}:{value}".format(key=shodanarg, value=kwargs[funcarg].lower()))
-    query = " ".join(queryargs)
-    sys.stderr.write("Inquiring shodan.io with \"%s\" (page %d)...\n" % (query, page,))
-
-    handler = request.HTTPSHandler(debuglevel=kwargs.get("debuglevel", 0))
-    opener = request.build_opener(handler)
-
-    repeatsleep = kwargs.get("repeatsleep", REPEAT_SLEEP)
-    url = "https://api.shodan.io/shodan/host/search"
+        funcval = kwargs.get(funcarg)
+        if funcval is not None:
+            querypieces.append("{key}:{value}".format(key=shodanarg, value=funcval))
+    queryargvalue = " ".join(querypieces)
+    sys.stderr.write("Inquiring shodan.io with \"%s\" (page %d)...\n" % (queryargvalue, page,))
 
     if testing:
         if page > 1:
             return (200, {"matches": []})
 
-        if kwargs.get("product", "").lower() == "mikrotik":
+        qlow =  queryargvalue.lower()
+        if "mikrotik" in qlow:
             return (200, {"matches": [{
                         "product": "MikroTik http proxy",
                         "ip": 2917626385,
@@ -148,7 +166,7 @@ def search_shodan(testing, page, **kwargs):
                         "ip": 3494743649,
                         "port": 8080
                         }]})
-        elif kwargs.get("product", "").lower() == "avtech":
+        elif "avtech" in qlow:
             return (200, {"matches": [{
                     "product": "Avtech AVN801 network camera",
                     "ip": 1805602870,
@@ -168,24 +186,15 @@ def search_shodan(testing, page, **kwargs):
     with open(os.path.expanduser("~/.shodan")) as f:
         shodan_key = f.read().strip()
 
-    while True:
-        try:
-            with opener.open(request.Request(url,
+    return resilient_open(request.Request(url,
                 parse.urlencode((
                         ("key", shodan_key),
-                        ("query", query),
+                        ("query", queryargvalue),
                         ("page", page),
-                    )).encode("ascii")), timeout=SHODAN_TIMEOUT) as response:
-                (code, body) = process_http_response(response, True)
-                break
-        except HTTPError as e:
-            (code, body) = process_http_error(e, True)
-            break
-        except NETWORK_ERRORS as e:
-            log_network_error(e, url)
-        sleep_with_banner(repeatsleep)
-
-    return (code, json.loads(body))
+                    )).encode("ascii")),
+                timeout=SHODAN_TIMEOUT,
+                repeatsleep=kwargs.get("repeatsleep", REPEAT_SLEEP),
+                debuglevel=kwargs.get("debuglevel", 0))
 
 
 def whoseip(ip, whoserole, debuglevel=0):
@@ -206,7 +215,7 @@ def whoseip(ip, whoserole, debuglevel=0):
     """
 
     def get_roles_addresses(entities):
-        er = [(e.get("roles", []), 
+        er = [(e.get("roles", []),
                 dict([(k, v) for (k, obj, kind, v) in e.get("vcardArray", [None, []])[1]]))
             for e in entities]
         for e in entities:
@@ -214,22 +223,20 @@ def whoseip(ip, whoserole, debuglevel=0):
                 er.extend(get_roles_addresses(e["entities"]))
         return er
 
-    handler = request.HTTPSHandler(debuglevel=debuglevel)
-    opener = request.build_opener(handler)
-
     emails = []
-    with opener.open(request.Request("https://rdap.arin.net/bootstrap/ip/%s" % (ip,))) as response:
-        r = json.loads(response.read().decode("utf-8"))
-        try:
-            entroles = get_roles_addresses(r["entities"])
-        except (KeyError, IndexError) as e:
-            sys.stderr.write("  *** %s %s in %s\n" % (e.__class__.__name__, 
-                    e, pformat(r)))
-            return emails
-        for roles, addr in entroles:
-            if whoserole in roles:
-                if "email" in addr:
-                    emails.append(addr["email"])
+    url = "https://rdap.arin.net/bootstrap/ip/%s" % (ip,)
+    (code, whoseobj) = resilient_open(request.Request(url), debuglevel=debuglevel)
+
+    try:
+        entroles = get_roles_addresses(whoseobj["entities"])
+    except (KeyError, IndexError) as e:
+        sys.stderr.write("  *** %s %s in %s\n" % (e.__class__.__name__,
+                e, pformat(r)))
+        return emails
+    for roles, addr in entroles:
+        if whoserole in roles:
+            if "email" in addr:
+                emails.append(addr["email"])
     return emails
 
 
@@ -286,8 +293,8 @@ def check(httpfilter, baseurl, opener):
 
     for (path_info, headers, bodysearch) in httpfilter:
         body = ""
+        url = baseurl + path_info
         try:
-            url = baseurl + path_info
             req = request.Request(url)
             for (name, value) in headers:
                 req.add_header(name, value)
@@ -300,11 +307,11 @@ def check(httpfilter, baseurl, opener):
             return False
 
         if bodysearch in body:
-            sys.stderr.write("  Got {bodysearch!r} in {url}{headersinfo}\n".format(bodysearch=bodysearch, 
+            sys.stderr.write("  Got {bodysearch!r} in {url}{headersinfo}\n".format(bodysearch=bodysearch,
                 url=url,
                 headersinfo=(" with %s" % (headers[0][0].decode("ascii"),) if len(headers) > 0 else "")))
             return True
-    
+
     sys.stderr.write("  *** The product appears protected at %s\n" % (baseurl,))
     return False
 
@@ -318,17 +325,25 @@ def filter_hosts(testing, infected_hosts, httpfilter, ready_emails, all_emails, 
 
     page_emails = {}
 
-    for (ip, port, is_ssl) in infected_hosts:
-        sys.stderr.write("%s\n" % (ip,))
+    for (host, port, is_ssl) in infected_hosts:
+        sys.stderr.write("%s\n" % (host,))
         if is_ssl:
-            url = "https://%s:%s" % (ip, port)
+            url = "https://%s:%s" % (host, port)
             opener = ssl_opener
         else:
-            url = "http://%s:%s" % (ip, port)
+            url = "http://%s:%s" % (host, port)
             opener = plain_opener
 
         if check(httpfilter, url, opener):
             found_emails = False
+            if isinstance(host, (IPv4Address, IPv6Address)):
+                ip = host
+            else:
+                # isinstance(host, str)
+                # Convert both 'xx.xx.xx.xx' and 'HOSTNAME' to
+                # ipaddress.IPvXAddress for soring.
+                ipstr = socket.gethostbyname(str(host))
+                ip = ip_address(ipstr)
             for e in whoseip(ip, "abuse"):
                 found_emails = True
                 sys.stderr.write("  %s\n" % (e,))
@@ -435,10 +450,12 @@ def main(argv):
     unittesting = False
     debuglevel = 0
     testing = False
+    shodanquery = None
     product = None
     country = None
     component = None
     macro = None
+    checkurl = None
     i = 1
     while i < len(argv):
         arg = argv[i]
@@ -448,6 +465,8 @@ def main(argv):
             testing = True
         elif arg == "-u":
             unittesting = True
+        elif arg == "--query":
+            (i, shodanquery) = next_arg(argv, i)
         elif arg == "--product":
             (i, product) = next_arg(argv, i)
         elif arg == "--country":
@@ -456,6 +475,8 @@ def main(argv):
             (i, component) = next_arg(argv, i)
         elif arg == "--macro":
             (i, macro) = next_arg(argv, i)
+        elif arg == "--url":
+            (i, checkurl) = next_arg(argv, i)
         elif arg.startswith("-"):
             raise Usage()
         else:
@@ -467,7 +488,10 @@ def main(argv):
         (failures, tests) = doctest.testmod(verbose=(not not debuglevel))
         raise SystemExit(0 if failures == 0 else 1 + (failures % 127))
 
-    if len(list(filter(bool, (product, country, component, macro)))) < 2:
+    numcond = len(list(filter(bool, (shodanquery, product, country, component, macro, checkurl))))
+    if numcond == 0:
+        raise Usage()
+    elif numcond < 2:
         raise Usage("The search will benefit from using at least 2 conditions")
 
     httpfilter = build_httpfilter(macro)
@@ -476,34 +500,45 @@ def main(argv):
     sent_name = "email-hosts.txt"
     all_emails = read_sent_emails(sent_name)
     ready_emails = {}
-    page = 1
-    page_sender_count = 0
-    while True:
-        (shodan_code, shodan_limits) = info_shodan(testing, debuglevel=debuglevel)
-        sys.stderr.write("Shodan code %d, limits:\n%s\n" % (shodan_code, pformat(shodan_limits),))
-        if shodan_code != 200:
-            break
 
-        (shodan_code, shodan_results) = search_shodan(testing, page, 
-                product=product, country=country, component=component, debuglevel=debuglevel)
-        if shodan_code != 200:
-            sys.stderr.write("Unexpected Shodan response:\n%s\n" % (pformat(shodan_results),))
-            break
+    if checkurl is None:
+        page = 1
+        page_sender_count = 0
+        while True:
+            (shodan_code, shodan_limits) = info_shodan(testing, debuglevel=debuglevel)
+            sys.stderr.write("Shodan code %d, limits:\n%s\n" % (shodan_code, pformat(shodan_limits),))
+            if shodan_code != 200:
+                break
 
-        numhosts = len(shodan_results["matches"])
-        sys.stderr.write("Found matches: {numhosts}\n".format(numhosts=numhosts))
-        if numhosts == 0:
-            break
-        infected_hosts = tuple((ip_address(match["ip"]), match["port"], not not match.get("ssl")) for match in shodan_results["matches"])
+            (shodan_code, shodan_results) = search_shodan(testing, page,
+                    query=shodanquery,
+                    product=product, country=country, component=component,
+                    debuglevel=debuglevel)
+            if shodan_code != 200:
+                sys.stderr.write("Unexpected Shodan response:\n%s\n" % (pformat(shodan_results),))
+                break
 
-        filter_hosts(testing, infected_hosts, httpfilter, ready_emails, all_emails, debuglevel=debuglevel)
-        page += 1
-        page_sender_count += 1
-        if page_sender_count == SEND_PAGES:
-            send_mail(testing, ready_emails, myaddr, product, component, macro)
-            write_sent_emails(testing, sent_name, all_emails)
-            ready_emails = {}
-            page_sender_count = 0
+            numhosts = len(shodan_results["matches"])
+            sys.stderr.write("Found matches: {numhosts}\n".format(numhosts=numhosts))
+            if numhosts == 0:
+                break
+            infected_hosts = tuple((ip_address(match["ip"]), match["port"], not not match.get("ssl")) for match in shodan_results["matches"])
+
+            filter_hosts(testing, infected_hosts, httpfilter, ready_emails, all_emails, debuglevel=debuglevel)
+            page += 1
+            page_sender_count += 1
+            if page_sender_count == SEND_PAGES:
+                send_mail(testing, ready_emails, myaddr, product, component, macro)
+                write_sent_emails(testing, sent_name, all_emails)
+                ready_emails = {}
+                page_sender_count = 0
+
+    else:
+        urlobj = parse.urlparse(checkurl)
+        filter_hosts(testing,
+                ((urlobj.hostname, urlobj.port, urlobj.scheme == "https"),),
+                httpfilter,
+                ready_emails, all_emails, debuglevel=debuglevel)
 
     send_mail(testing, ready_emails, myaddr, product, component, macro)
     write_sent_emails(testing, sent_name, all_emails)
