@@ -387,11 +387,11 @@ def extract_thing(shodanquery):
 
 def send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro):
     thing = extract_thing(shodanquery)
-    prodname = thing if thing else (
-                product if product else (
-                    "AVTech" if macro == WEAK_AVTECH else "internet thing"
-                    )
-                )
+    prodname = "AVTech" if macro == WEAK_AVTECH else (
+            product if product else (
+                thing if thing else "internet thing"
+            )
+        )
     if macro == CHECK_COINHIVE:
         vulnerability = "showing Coinhive"
     elif macro == WEAK_AVTECH:
