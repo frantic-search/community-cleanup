@@ -513,6 +513,9 @@ def main(argv):
     if checkurl and not macro:
         raise Usage("The --url argument will benefit from using a macro to check it")
 
+    if checkurl and (shodanquery or product or country or component):
+        raise Usage("The --url argument overrides Shodan search")
+
     httpfilter = build_httpfilter(macro)
 
     myaddr = "{USER}@{HOSTNAME}".format(USER=os.environ["USER"], HOSTNAME=socket.gethostname())
