@@ -40,19 +40,25 @@ class Usage(SystemExit):
 
 
 def process_http_error(e, quiet=False):
+    code = e.getcode()
     try:
         body = e.read().decode("utf-8", errors="replace")
     except (HTTPError,) + NETWORK_ERRORS as e2:
         body = ""
-        sys.stderr.write("  *** HTTP response to {url}: code {code}, body unavailable due to {classname}\n".format(url=e.geturl(),
+        sys.stderr.write("  *** Error reading HTTP response to {url}: original code {code}, body unavailable due to {classname}\n".format(url=e.geturl(),
                 code=e.getcode(), classname=e2.__class__.__name__))
+        code = 0
     else:
-        if not quiet:
+        if ((code < 200) or (code >= 300)) and not quiet:
             sys.stderr.write("  *** HTTP response to {url}: code {code}, body {body!r}...\n".format(url=e.geturl(), 
                     code=e.getcode(), body=body[:20]))
-    return body
+    return (code, body)
 
 
+process_http_response = process_http_error
+
+
+SHODAN_TIMEOUT = 15
 URL_TIMEOUT = 5
 REPEAT_SLEEP = 5
 NETWORK_ERRORS = (socket.timeout, ConnectionRefusedError, ConnectionResetError, URLError, OSError)
@@ -76,7 +82,7 @@ def info_shodan(testing, **kwargs):
     url = "https://api.shodan.io/api-info"
 
     if testing:
-        return {"https": False,
+        return (200, {"https": False,
 			 "monitored_ips": 8586,
 			 "plan": "dev",
 			 "query_credits": 10,
@@ -86,7 +92,7 @@ def info_shodan(testing, **kwargs):
 			 "unlocked_left": 10,
 			 "usage_limits": {"monitored_ips": 16,
 							  "query_credits": 100,
-							  "scan_credits": 100}}
+							  "scan_credits": 100}})
 
     with open(os.path.expanduser("~/.shodan")) as f:
         shodan_key = f.read().strip()
@@ -94,18 +100,19 @@ def info_shodan(testing, **kwargs):
     while True:
         try:
             with opener.open(request.Request(url,
-                parse.urlencode((
-                        ("key", shodan_key),
-                    )).encode("ascii")), timeout=URL_TIMEOUT) as response:
-                if response.getcode() != 200:
-                    body = process_http_error(response)
-                else:
-                    return json.loads(response.read().decode("utf-8"))
+                    parse.urlencode((
+                            ("key", shodan_key),
+                        )).encode("ascii")), timeout=SHODAN_TIMEOUT) as response:
+                (code, body) = process_http_response(response, True)
+                break
         except HTTPError as e:
-            body = process_http_error(e)
+            (code, body) = process_http_error(e, True)
+            break
         except NETWORK_ERRORS as e:
             log_network_error(e, url)
         sleep_with_banner(repeatsleep)
+
+    return (code, json.loads(body))
 
 
 def search_shodan(testing, page, **kwargs):
@@ -129,10 +136,10 @@ def search_shodan(testing, page, **kwargs):
 
     if testing:
         if page > 1:
-            return {"matches": []}
+            return (200, {"matches": []})
 
         if kwargs.get("product", "").lower() == "mikrotik":
-            return {"matches": [{
+            return (200, {"matches": [{
                         "product": "MikroTik http proxy",
                         "ip": 2917626385,
                         "port": 8080
@@ -140,9 +147,9 @@ def search_shodan(testing, page, **kwargs):
                         "product": "MikroTik http proxy",
                         "ip": 3494743649,
                         "port": 8080
-                        }]}
+                        }]})
         elif kwargs.get("product", "").lower() == "avtech":
-            return {"matches": [{
+            return (200, {"matches": [{
                     "product": "Avtech AVN801 network camera",
                     "ip": 1805602870,
                     "port": 88
@@ -154,7 +161,7 @@ def search_shodan(testing, page, **kwargs):
                     "product": "Avtech AVN801 network camera",
                     "ip": 2264972081,
                     "port": 88
-                    }]}
+                    }]})
         else:
             raise Usage("Only MikroTik and AVTech products are mocked for Shodan")
 
@@ -168,16 +175,17 @@ def search_shodan(testing, page, **kwargs):
                         ("key", shodan_key),
                         ("query", query),
                         ("page", page),
-                    )).encode("ascii")), timeout=URL_TIMEOUT) as response:
-                if response.getcode() != 200:
-                    body = process_http_error(response)
-                else:
-                    return json.loads(response.read().decode("utf-8"))
+                    )).encode("ascii")), timeout=SHODAN_TIMEOUT) as response:
+                (code, body) = process_http_response(response, True)
+                break
         except HTTPError as e:
-            body = process_http_error(e)
+            (code, body) = process_http_error(e, True)
+            break
         except NETWORK_ERRORS as e:
             log_network_error(e, url)
         sleep_with_banner(repeatsleep)
+
+    return (code, json.loads(body))
 
 
 def whoseip(ip, whoserole, debuglevel=0):
@@ -233,7 +241,7 @@ def read_sent_emails(sent_name):
                 line = line.strip()
                 if not line:
                     continue
-                email, iptext = line.split(None, 1)
+                (email, iptext) = line.split(None, 1)
                 if email.endswith(":"):
                     email = email[:-1]
                 ips = []
@@ -284,9 +292,9 @@ def check(httpfilter, baseurl, opener):
             for (name, value) in headers:
                 req.add_header(name, value)
             with opener.open(req, timeout=URL_TIMEOUT) as response:
-                body = response.read().decode("utf-8", errors="replace")
+                (code, body) = process_http_response(response, True)
         except HTTPError as e:
-            body = process_http_error(e, True)
+            (code, body) = process_http_error(e, True)
         except NETWORK_ERRORS as e:
             log_network_error(e, url)
             return False
@@ -441,13 +449,13 @@ def main(argv):
         elif arg == "-u":
             unittesting = True
         elif arg == "--product":
-            i, product = next_arg(argv, i)
+            (i, product) = next_arg(argv, i)
         elif arg == "--country":
-            i, country = next_arg(argv, i)
+            (i, country) = next_arg(argv, i)
         elif arg == "--component":
-            i, component = next_arg(argv, i)
+            (i, component) = next_arg(argv, i)
         elif arg == "--macro":
-            i, macro = next_arg(argv, i)
+            (i, macro) = next_arg(argv, i)
         elif arg.startswith("-"):
             raise Usage()
         else:
@@ -471,10 +479,17 @@ def main(argv):
     page = 1
     page_sender_count = 0
     while True:
-        shodan_limits = info_shodan(testing, debuglevel=debuglevel)
-        sys.stderr.write("Shodan limits:\n%s\n" % (pformat(shodan_limits),))
+        (shodan_code, shodan_limits) = info_shodan(testing, debuglevel=debuglevel)
+        sys.stderr.write("Shodan code %d, limits:\n%s\n" % (shodan_code, pformat(shodan_limits),))
+        if shodan_code != 200:
+            break
 
-        shodan_results = search_shodan(testing, page, product=product, country=country, component=component, debuglevel=debuglevel)
+        (shodan_code, shodan_results) = search_shodan(testing, page, 
+                product=product, country=country, component=component, debuglevel=debuglevel)
+        if shodan_code != 200:
+            sys.stderr.write("Unexpected Shodan response:\n%s\n" % (pformat(shodan_results),))
+            break
+
         numhosts = len(shodan_results["matches"])
         sys.stderr.write("Found matches: {numhosts}\n".format(numhosts=numhosts))
         if numhosts == 0:
