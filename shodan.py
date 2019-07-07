@@ -377,21 +377,25 @@ def filter_hosts(testing, infected_hosts, httpfilter, ready_emails, all_emails, 
 
 
 def extract_thing(shodanquery):
-    pieces = shodanquery.split()
-    thing_pieces = []
-    for piece in pieces:
-        if ":" not in piece:
-            thing_pieces.append(piece)
-    return " ".join(thing_pieces)
+    if shodanquery:
+        pieces = shodanquery.split()
+        thing_pieces = []
+        for piece in pieces:
+            if ":" not in piece:
+                thing_pieces.append(piece)
+        return " ".join(thing_pieces)
+    else:
+        return ""
 
 
 def send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro):
-    thing = extract_thing(shodanquery)
-    prodname = "AVTech" if macro == WEAK_AVTECH else (
-            product if product else (
-                thing if thing else "internet thing"
-            )
-        )
+    if macro == WEAK_AVTECH:
+        prodname = "AVTech"
+    elif product:
+        prodname = product
+    else:
+        prodname = extract_thing(shodanquery) or "internet thing"
+
     if macro == CHECK_COINHIVE:
         vulnerability = "showing Coinhive"
     elif macro == WEAK_AVTECH:
@@ -504,17 +508,19 @@ def main(argv):
         (failures, tests) = doctest.testmod(verbose=(not not debuglevel))
         raise SystemExit(0 if failures == 0 else 1 + (failures % 127))
 
-    numcond = len(list(filter(bool, (shodanquery, product, country, component, macro, checkurl))))
-    if numcond == 0:
-        raise Usage()
-    elif numcond < 2:
-        raise Usage("The search will benefit from using at least 2 conditions")
+    if checkurl:
+        if not macro:
+            raise Usage("The --url argument will benefit from using a macro to check it")
 
-    if checkurl and not macro:
-        raise Usage("The --url argument will benefit from using a macro to check it")
+        if shodanquery or product or country or component:
+            raise Usage("The --url argument overrides Shodan search")
+    else:
+        numcond = len(list(filter(bool, (shodanquery, product, country, component, macro))))
+        if numcond == 0:
+            raise Usage()
+        elif numcond < 2:
+            raise Usage("The search will benefit from using at least 2 conditions")
 
-    if checkurl and (shodanquery or product or country or component):
-        raise Usage("The --url argument overrides Shodan search")
 
     httpfilter = build_httpfilter(macro)
 
