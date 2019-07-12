@@ -24,6 +24,7 @@ e.g.,
 
 from urllib import request, parse
 from urllib.error import HTTPError, URLError
+from http.client import BadStatusLine, CannotSendRequest
 import ssl
 import json
 import base64
@@ -48,6 +49,16 @@ class Usage(SystemExit):
             message=("\nError: %s\n" % (message,) if message else "")))
 
 
+SHODAN_TIMEOUT = 15
+URL_TIMEOUT = 5
+REPEAT_SLEEP = 5
+NETWORK_ERRORS = (socket.timeout, socket.error, socket.herror, socket.gaierror,
+        OSError,
+        BadStatusLine, CannotSendRequest,
+        ConnectionRefusedError, ConnectionResetError, 
+        URLError)
+
+
 def process_http_error(e, quiet=False):
     code = e.getcode()
     try:
@@ -67,10 +78,6 @@ def process_http_error(e, quiet=False):
 process_http_response = process_http_error
 
 
-SHODAN_TIMEOUT = 15
-URL_TIMEOUT = 5
-REPEAT_SLEEP = 5
-NETWORK_ERRORS = (socket.timeout, ConnectionRefusedError, ConnectionResetError, URLError, OSError)
 def log_network_error(e, url):
     sys.stderr.write("  *** Network {classname} with {url}\n".format(classname=e.__class__.__name__,
         url=url))
@@ -81,7 +88,7 @@ def sleep_with_banner(repeatsleep):
     time.sleep(repeatsleep)
 
 
-def resilient_open(req, timeout=URL_TIMEOUT, repeatsleep=REPEAT_SLEEP, debuglevel=0):
+def resilient_send(req, timeout=URL_TIMEOUT, repeatsleep=REPEAT_SLEEP, debuglevel=0):
     url = req.full_url
     if url.startswith("https:"):
         handlerclass = request.HTTPSHandler
@@ -124,7 +131,7 @@ def info_shodan(testing, **kwargs):
     with open(os.path.expanduser("~/.shodan")) as f:
         shodan_key = f.read().strip()
 
-    return resilient_open(request.Request(url,
+    return resilient_send(request.Request(url,
                 parse.urlencode((
                         ("key", shodan_key),
                     )).encode("ascii")),
@@ -186,7 +193,7 @@ def search_shodan(testing, page, **kwargs):
     with open(os.path.expanduser("~/.shodan")) as f:
         shodan_key = f.read().strip()
 
-    return resilient_open(request.Request(url,
+    return resilient_send(request.Request(url,
                 parse.urlencode((
                         ("key", shodan_key),
                         ("query", queryargvalue),
@@ -205,7 +212,7 @@ def whoseip(ip, whoserole, debuglevel=0):
     ['abuse@sasktel.net']
 
     >>> whoseip('109.87.56.48', 'abuse')
-    ['noc@triolan.com']
+    ['abuse@triolan.com.ua']
 
     >>> whoseip('76.67.127.81', 'abuse')
     ['abuse@sympatico.ca', 'abuse@bell.ca']
@@ -225,7 +232,7 @@ def whoseip(ip, whoserole, debuglevel=0):
 
     emails = []
     url = "https://rdap.arin.net/bootstrap/ip/%s" % (ip,)
-    (code, whoseobj) = resilient_open(request.Request(url), debuglevel=debuglevel)
+    (code, whoseobj) = resilient_send(request.Request(url), debuglevel=debuglevel)
 
     try:
         entroles = get_roles_addresses(whoseobj["entities"])
@@ -306,7 +313,7 @@ def check(httpfilter, baseurl, opener):
             log_network_error(e, url)
             return False
 
-        if bodysearch in body:
+        if bodysearch.lower() in body.lower():
             sys.stderr.write("  Got {bodysearch!r} in {url}{headersinfo}\n".format(bodysearch=bodysearch,
                 url=url,
                 headersinfo=(" with %s" % (headers[0][0].decode("ascii"),) if len(headers) > 0 else "")))
