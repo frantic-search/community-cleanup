@@ -427,7 +427,7 @@ Your %s at the following address(es) appeared vulnerable to abuse and botnets%s:
 Best regards,
 
 A community cleanup initiative
-https://github.com/ilatypov/community-cleanup
+https://github.com/frantic-search/community-cleanup
 """ % (e, prodname,
     "" if vulnerability is None else "\nbecause of %s" % (vulnerability,),
     "\n  ".join(str(ehost) for ehost in ehosts)))
@@ -531,7 +531,7 @@ def main(argv):
 
     httpfilter = build_httpfilter(macro)
 
-    myaddr = "{USER}@{HOSTNAME}".format(USER=os.environ["USER"], HOSTNAME=socket.gethostname())
+    myaddr = "\"Community Cleanup Initiative\" <community_cleanup@yahoo.com>"
     sent_name = "email-hosts.txt"
     all_emails = read_sent_emails(sent_name)
     ready_emails = {}
