@@ -539,7 +539,7 @@ Legend:
 
     Weak AVTech: attackers may discover (or already discovered) a chance to
     take control of the device due to a weakness in the firmware or leaving
-    default password unchanfged.
+    the default password unchanged.
 
         https://seclists.org/bugtraq/2016/Oct/26
 
