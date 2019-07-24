@@ -9,6 +9,7 @@ Usage:
             [--component COMPONENT] \
             [--macro MACRO] \
             [--url httpX://HOST:PORT]
+            [--rerun EMAIL]
 
 e.g.,
 
@@ -19,8 +20,22 @@ e.g.,
             --macro {WEAK_AVTECH}
 
     python3 {script} -t --macro {WEAK_AVTECH} --url http://SUSPECT:PORT
+
+    python3 {script} -t --rerun abuse@telus.com
 {message}
 """
+
+import os
+if os.name == "nt":
+    # Check if executing the Windows build of Python from a Cygwin shell.
+    if "TZ" in os.environ:
+        # The Windows build of Python (as opposed to the Cygwin one) appears
+        # confused with the TZ variable set by the Cygwin shell.  The former
+        # sets time.timezone to 0, time.altzone to -3600 (-1 hr) in the
+        # presence of TZ="America/New_York", which turns the local time zone to
+        # UTC.
+        del os.environ["TZ"]
+import time
 
 from urllib import request, parse
 from urllib.error import HTTPError, URLError
@@ -28,10 +43,9 @@ from http.client import BadStatusLine, CannotSendRequest
 import ssl
 import json
 import base64
-import time
 from pprint import pformat
 from ipaddress import ip_address, IPv4Address, IPv6Address
-import struct, socket, sys, os
+import struct, socket, sys
 import smtplib
 from email.mime.text import MIMEText
 
@@ -39,7 +53,7 @@ from email.mime.text import MIMEText
 SEND_PAGES = 3
 CHECK_COINHIVE = "check_coinhive"
 WEAK_AVTECH = "weak_avtech"
-
+MACROS = (CHECK_COINHIVE, WEAK_AVTECH)
 
 class Usage(SystemExit):
     def __init__(self, message=None):
@@ -47,6 +61,26 @@ class Usage(SystemExit):
             CHECK_COINHIVE=CHECK_COINHIVE,
             WEAK_AVTECH=WEAK_AVTECH,
             message=("\nError: %s\n" % (message,) if message else "")))
+
+
+def local_timestamp(s_since_epoch=None):
+    if s_since_epoch is not None:
+        if s_since_epoch < 0:
+            return "infinity"
+        elif s_since_epoch == 0:
+            return "olden times"
+    t = time.localtime(s_since_epoch)
+    is_dst = time.daylight and t.tm_isdst
+    zone = time.altzone if is_dst else time.timezone
+    strtime = time.strftime("%Y-%m-%d %H:%M:%S", t)
+    utcoff = -zone
+    if utcoff > 0:
+        utcsign = "+"
+    else:
+        utcsign = "-"
+        utcoff = -utcoff
+    strtime += ("%s%02d%02d" % (utcsign, utcoff // 3600, (utcoff % 3600) // 60))
+    return strtime
 
 
 SHODAN_TIMEOUT = 15
@@ -112,21 +146,39 @@ def resilient_send(req, timeout=URL_TIMEOUT, repeatsleep=REPEAT_SLEEP, debugleve
     return (code, json.loads(body))
 
 
+def myip_shodan(testing, **kwargs):
+    url = "https://api.shodan.io/tools/myip"
+    sys.stderr.write("Inquiring shodan.io on my IP address...\n")
+    if testing:
+        return (200, "45.56.111.4")
+
+    with open(os.path.expanduser("~/.shodan")) as f:
+        shodan_key = f.read().strip()
+
+    return resilient_send(request.Request(url,
+                parse.urlencode((
+                        ("key", shodan_key),
+                    )).encode("ascii")),
+                timeout=SHODAN_TIMEOUT,
+                repeatsleep=kwargs.get("repeatsleep", REPEAT_SLEEP),
+                debuglevel=kwargs.get("debuglevel", 0))
+
+
 def info_shodan(testing, **kwargs):
     url = "https://api.shodan.io/api-info"
     sys.stderr.write("Inquiring shodan.io on API usage limits...\n")
     if testing:
         return (200, {"https": False,
-			 "monitored_ips": 8586,
-			 "plan": "dev",
-			 "query_credits": 10,
-			 "scan_credits": 100,
-			 "telnet": False,
-			 "unlocked": True,
-			 "unlocked_left": 10,
-			 "usage_limits": {"monitored_ips": 16,
-							  "query_credits": 100,
-							  "scan_credits": 100}})
+             "monitored_ips": 8586,
+             "plan": "dev",
+             "query_credits": 10,
+             "scan_credits": 100,
+             "telnet": False,
+             "unlocked": True,
+             "unlocked_left": 10,
+             "usage_limits": {"monitored_ips": 16,
+                              "query_credits": 100,
+                              "scan_credits": 100}})
 
     with open(os.path.expanduser("~/.shodan")) as f:
         shodan_key = f.read().strip()
@@ -146,6 +198,7 @@ def search_shodan(testing, page, **kwargs):
             ("product", "product"),
             ("component", "http.component"),
             ("country", "country"),
+            ("ip", "ip"),
         )
     querypieces = []
     query = kwargs.get("query")
@@ -187,8 +240,40 @@ def search_shodan(testing, page, **kwargs):
                     "ip": 2264972081,
                     "port": 88
                     }]})
+        elif "ip:" in qlow:
+            return (200, {
+                  "matches": [
+                    {
+                      "ip": 386931311,
+                      "port": 9090,
+                      "product": "Avtech AVN801 network camera",
+                      "http": {
+                      },
+                    },
+                    {
+                      "ip": 3639140288,
+                      "port": 8443,
+                      "ssl": {
+                      },
+                      "http": {
+                      },
+                    },
+                    {
+                      "ip": 3639140288,
+                      "port": 1723,
+                    },
+                    {
+                      "product": "MikroTik http proxy",
+                      "ip": 2925431185,
+                      "port": 8080,
+                      "http": {
+                      },
+                    },
+                  ],
+                  "total": 4
+                })
         else:
-            raise Usage("Only MikroTik and AVTech products are mocked for Shodan")
+            raise Usage("Only MikroTik and AVTech products, as well as IP lookups, are mocked as Shodan results")
 
     with open(os.path.expanduser("~/.shodan")) as f:
         shodan_key = f.read().strip()
@@ -293,7 +378,7 @@ def build_httpfilter(macro):
     return httpfilter
 
 
-def check(httpfilter, baseurl, opener):
+def check(httpfilter, baseurl, opener, findings=None):
     if len(httpfilter) == 0:
         # Assume the host vulnerable in the absence of HTTP checks
         return True
@@ -314,34 +399,67 @@ def check(httpfilter, baseurl, opener):
             return False
 
         if bodysearch.lower() in body.lower():
-            sys.stderr.write("  Got {bodysearch!r} in {url}{headersinfo}\n".format(bodysearch=bodysearch,
+            finding = "Got {bodysearch!r} in {url}{headersinfo}".format(bodysearch=bodysearch,
                 url=url,
-                headersinfo=(" with %s" % (headers[0][0].decode("ascii"),) if len(headers) > 0 else "")))
+                headersinfo=(" with %s" % (headers[0][0].decode("ascii"),) if len(headers) > 0 else ""))
+            sys.stderr.write("  %s\n" % (finding,))
+            if findings is not None:
+                findings.append(finding)
             return True
 
     sys.stderr.write("  *** The product appears protected at %s\n" % (baseurl,))
     return False
 
 
-def filter_hosts(testing, infected_hosts, httpfilter, ready_emails, all_emails, debuglevel=0):
-    ssl_handler = request.HTTPSHandler(debuglevel=debuglevel, context=ssl._create_unverified_context(), check_hostname=False)
-    ssl_opener = request.build_opener(ssl_handler)
+def log_hosts(testing, hosts, openers, httpfilters, debuglevel=0):
+    logs = []
+    for hostrec in hosts:
+        host = ip_address(hostrec["ip"])
+        port = hostrec["port"]
+        is_ssl = "ssl" in hostrec
+        url = "http%s://%s:%s" % ("s" if is_ssl else "", host, port)
+        sys.stderr.write("%s\n" % (url,))
 
-    plain_handler = request.HTTPHandler(debuglevel=debuglevel)
-    plain_opener = request.build_opener(plain_handler)
+        product = hostrec.get("product", "").lower()
+        if "avtech" in product:
+            macro = WEAK_AVTECH
+            vuln = "Weak AVTech"
+        elif "mikrotik" in product:
+            macro = CHECK_COINHIVE
+            vuln = "Infected with Coinhive"
+        else:
+            sys.stderr.write("  %s\n" % ("No product" if product is None
+                else "Unexpected product %s" % (product,)))
+            continue
+        httpfilter = httpfilters[macro]
+        findings = []
+        ts = local_timestamp()
+        if check(httpfilter, url, openers[is_ssl], findings):
+            if isinstance(host, (IPv4Address, IPv6Address)):
+                ip = host
+            else:
+                # isinstance(host, str)
+                # Convert both 'xx.xx.xx.xx' and 'HOSTNAME' to
+                # ipaddress.IPvXAddress for soring.
+                ipstr = socket.gethostbyname(str(host))
+                ip = ip_address(ipstr)
+            logrec = "{ts} {ip} {vuln}: {finds}".format(ts=ts,
+                    ip=ip,
+                    vuln=vuln,
+                    finds=", ".join(findings))
+            logs.append(logrec)
+            sys.stderr.write("  %s\n" % (logrec,))
+    return logs
 
+
+def filter_hosts(testing, infected_hosts, openers, httpfilter, ready_emails, all_emails, debuglevel=0):
     page_emails = {}
 
     for (host, port, is_ssl) in infected_hosts:
         sys.stderr.write("%s\n" % (host,))
-        if is_ssl:
-            url = "https://%s:%s" % (host, port)
-            opener = ssl_opener
-        else:
-            url = "http://%s:%s" % (host, port)
-            opener = plain_opener
+        url = "http%s://%s:%s" % ("s" if is_ssl else "", host, port)
 
-        if check(httpfilter, url, opener):
+        if check(httpfilter, url, openers[is_ssl]):
             found_emails = False
             if isinstance(host, (IPv4Address, IPv6Address)):
                 ip = host
@@ -393,6 +511,60 @@ def extract_thing(shodanquery):
         return " ".join(thing_pieces)
     else:
         return ""
+
+
+def send_logs_mail(testing, myaddr, myipaddr, rerun, logs):
+    if testing:
+        sys.stderr.write("Testing email for %s by sending it just to myself...\n" % (rerun,))
+    else:
+        sys.stderr.write("Sending email to %s...\n" % (rerun,))
+    msg = MIMEText("""
+Hello {rerun},
+
+The following address(es) appeared vulnerable to abuse and botnets, according
+to the shown requests from the IP address {myipaddr}.
+
+  {logstr}
+
+Legend:
+
+    Weak AVTech: attackers may discover (or already discovered) a chance to
+    take control of the device due to a weakness in the firmware or leaving
+    default password unchanfged.
+
+        https://seclists.org/bugtraq/2016/Oct/26
+
+        https://www.exploit-db.com/exploits/40500
+
+    Infected with Coinhive: attackers already discovered a weakness in the
+    device by taking control of it and setting up Coinhive in its HTML code.
+    This finding is not exhaustive.  There may be other vulnerable routers or
+    routers that were infected but whose attackers did not set up Coinhive.
+
+        https://www.zdnet.com/article/mikrotik-routers-enslaved-in-massive-coinhive-cryptojacking-campaign/
+
+        https://www.securityweek.com/remotely-exploitable-vulnerability-discovered-mikrotiks-routeros
+
+    None of these findings imply that the owners of the devices were
+    responsible for malicious activities.  Instead, they became or may become
+    victims of remote attacks.  Once successful, the attackers take control of
+    the device and use it for other activities.
+
+Best regards,
+
+A community cleanup initiative
+https://github.com/frantic-search/community-cleanup
+""".format(rerun=rerun,
+    myipaddr=myipaddr,
+    logstr="\n  ".join(logs)))
+
+    recipients = [myaddr]
+    msg["Subject"] = "%sCommunity cleanup: logged requests" % ("TESTING: " if testing else "",)
+    msg["From"] = myaddr
+    msg["To"] = myaddr
+    s = smtplib.SMTP("localhost")
+    s.sendmail(myaddr, recipients, msg.as_string())
+    s.quit()
 
 
 def send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro):
@@ -483,6 +655,7 @@ def main(argv):
     component = None
     macro = None
     checkurl = None
+    rerun = None
     i = 1
     while i < len(argv):
         arg = argv[i]
@@ -504,6 +677,8 @@ def main(argv):
             (i, macro) = next_arg(argv, i)
         elif arg == "--url":
             (i, checkurl) = next_arg(argv, i)
+        elif arg == "--rerun":
+            (i, rerun) = next_arg(argv, i)
         elif arg.startswith("-"):
             raise Usage()
         else:
@@ -521,6 +696,9 @@ def main(argv):
 
         if shodanquery or product or country or component:
             raise Usage("The --url argument overrides Shodan search")
+    elif rerun:
+        if shodanquery or product or country or component or macro:
+            raise Usage("The --rerun argument overrides Shodan search")
     else:
         numcond = len(list(filter(bool, (shodanquery, product, country, component, macro))))
         if numcond == 0:
@@ -529,54 +707,98 @@ def main(argv):
             raise Usage("The search will benefit from using at least 2 conditions")
 
 
-    httpfilter = build_httpfilter(macro)
-
     myaddr = "\"Community Cleanup Initiative\" <community_cleanup@yahoo.com>"
     sent_name = "email-hosts.txt"
     all_emails = read_sent_emails(sent_name)
     ready_emails = {}
 
-    if checkurl is None:
-        page = 1
-        page_sender_count = 0
-        while True:
-            (shodan_code, shodan_limits) = info_shodan(testing, debuglevel=debuglevel)
-            sys.stderr.write("Shodan code %d, limits:\n%s\n" % (shodan_code, pformat(shodan_limits),))
-            if shodan_code != 200:
-                break
+    httpfilters = {}
+    for m in MACROS:
+        httpfilters[m] = build_httpfilter(m)
 
-            (shodan_code, shodan_results) = search_shodan(testing, page,
-                    query=shodanquery,
-                    product=product, country=country, component=component,
-                    debuglevel=debuglevel)
-            if shodan_code != 200:
-                sys.stderr.write("Unexpected Shodan response:\n%s\n" % (pformat(shodan_results),))
-                break
+    openers = {}
+    for is_ssl in (False, True):
+        if is_ssl:
+            handler = request.HTTPSHandler(debuglevel=debuglevel, context=ssl._create_unverified_context(), check_hostname=False)
+        else:
+            handler = request.HTTPHandler(debuglevel=debuglevel)
+        openers[is_ssl] = request.build_opener(handler)
 
-            numhosts = len(shodan_results["matches"])
-            sys.stderr.write("Found matches: {numhosts}\n".format(numhosts=numhosts))
-            if numhosts == 0:
-                break
-            infected_hosts = tuple((ip_address(match["ip"]), match["port"], not not match.get("ssl")) for match in shodan_results["matches"])
-
-            filter_hosts(testing, infected_hosts, httpfilter, ready_emails, all_emails, debuglevel=debuglevel)
-            page += 1
-            page_sender_count += 1
-            if page_sender_count == SEND_PAGES:
-                send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro)
-                write_sent_emails(testing, sent_name, all_emails)
-                ready_emails = {}
-                page_sender_count = 0
-
+    if rerun:
+        if rerun not in all_emails:
+            raise Usage("The --rerun argument selects past findings by an email address")
+        (shodan_code, shodan_limits) = info_shodan(testing, debuglevel=debuglevel)
+        sys.stderr.write("Shodan code %d, limits:\n%s\n" % (shodan_code, pformat(shodan_limits),))
+        if shodan_code == 200:
+            (shodan_code, myip) = myip_shodan(testing, debuglevel=debuglevel)
+            if shodan_code == 200:
+                sys.stderr.write("My IP: %s\n" % (myip,))
+                myipaddr = ip_address(myip)
+                ips = ",".join(str(ip) for ip in all_emails[rerun])
+                page = 1
+                logs = []
+                while True:
+                    (shodan_code, shodan_results) = search_shodan(testing, page,
+                            ip=ips,
+                            debuglevel=debuglevel)
+                    if shodan_code != 200:
+                        sys.stderr.write("Unexpected Shodan response:\n%s\n" % (pformat(shodan_results),))
+                        break
+                    numhosts = len(shodan_results["matches"])
+                    sys.stderr.write("Found matches: {numhosts}\n".format(numhosts=numhosts))
+                    if numhosts == 0:
+                        break
+                    hosts = tuple(match for match in shodan_results["matches"]
+                                if "http" in match)
+                    logs.extend(log_hosts(testing, hosts, openers, httpfilters, debuglevel=debuglevel))
+                    page += 1
+                send_logs_mail(testing, myaddr, myipaddr, rerun, logs)
     else:
-        urlobj = parse.urlparse(checkurl)
-        filter_hosts(testing,
-                ((urlobj.hostname, urlobj.port, urlobj.scheme == "https"),),
-                httpfilter,
-                ready_emails, all_emails, debuglevel=debuglevel)
+        httpfilter = httpfilters[macro]
+        if checkurl is None:
+            page = 1
+            page_sender_count = 0
+            while True:
+                (shodan_code, shodan_limits) = info_shodan(testing, debuglevel=debuglevel)
+                sys.stderr.write("Shodan code %d, limits:\n%s\n" % (shodan_code, pformat(shodan_limits),))
+                if shodan_code != 200:
+                    break
 
-    send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro)
-    write_sent_emails(testing, sent_name, all_emails)
+                (shodan_code, shodan_results) = search_shodan(testing, page,
+                        query=shodanquery,
+                        product=product, country=country, component=component,
+                        debuglevel=debuglevel)
+                if shodan_code != 200:
+                    sys.stderr.write("Unexpected Shodan response:\n%s\n" % (pformat(shodan_results),))
+                    break
+
+                numhosts = len(shodan_results["matches"])
+                sys.stderr.write("Found matches: {numhosts}\n".format(numhosts=numhosts))
+                if numhosts == 0:
+                    break
+                infected_hosts = tuple((ip_address(match["ip"]), match["port"], "ssl" in match)
+                        for match in shodan_results["matches"]
+                            if "http" in match)
+
+                filter_hosts(testing, infected_hosts, openers, httpfilter, ready_emails, all_emails, debuglevel=debuglevel)
+                page += 1
+                page_sender_count += 1
+                if page_sender_count == SEND_PAGES:
+                    send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro)
+                    write_sent_emails(testing, sent_name, all_emails)
+                    ready_emails = {}
+                    page_sender_count = 0
+
+        else:
+            urlobj = parse.urlparse(checkurl)
+            filter_hosts(testing,
+                    ((urlobj.hostname, urlobj.port, urlobj.scheme == "https"),),
+                    openers,
+                    httpfilter,
+                    ready_emails, all_emails, debuglevel=debuglevel)
+
+        send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro)
+        write_sent_emails(testing, sent_name, all_emails)
 
 
 if __name__ == "__main__":
