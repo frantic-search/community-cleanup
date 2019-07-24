@@ -435,7 +435,7 @@ def log_hosts(testing, hosts, openers, httpfilters, debuglevel=0):
             vuln = "Weak AVTech"
         elif "mikrotik" in product:
             macro = CHECK_COINHIVE
-            vuln = "Infected with Coinhive"
+            vuln = "Infected MikroTik"
         else:
             sys.stderr.write("    %s\n" % ("No product" if product is None
                 else "Unexpected product %s" % (product,)))
@@ -452,11 +452,11 @@ def log_hosts(testing, hosts, openers, httpfilters, debuglevel=0):
                 # ipaddress.IPvXAddress for soring.
                 ipstr = socket.gethostbyname(str(host))
                 ip = ip_address(ipstr)
-            logrec = "{ts} {ip} {vuln}: {finds}".format(ts=ts,
-                    ip=ip,
+            logrec = "{ip!s:>15} {ts} {vuln:<17} {finds}".format(ip=ip,
+                    ts=ts,
                     vuln=vuln,
                     finds=", ".join(findings))
-            logs.append(logrec)
+            logs.append((ip, logrec))
             sys.stderr.write("    %s\n" % (logrec,))
     return logs
 
@@ -545,9 +545,9 @@ Legend:
 
         https://www.exploit-db.com/exploits/40500
 
-    Infected with Coinhive: attackers already discovered a weakness in the
-    device by taking control of it and setting up Coinhive in its HTML code.
-    This finding is not exhaustive.  There may be other vulnerable routers or
+    Infected MikroTik: attackers already discovered a weakness in the device by
+    taking control of it and setting up Coinhive in its HTML code.  This
+    finding is not exhaustive.  There may be other vulnerable routers or
     routers that were infected but whose attackers did not set up Coinhive.
 
         https://www.zdnet.com/article/mikrotik-routers-enslaved-in-massive-coinhive-cryptojacking-campaign/
@@ -565,7 +565,7 @@ A community cleanup initiative
 https://github.com/frantic-search/community-cleanup
 """.format(rerun=rerun,
     myipaddr=myipaddr,
-    logstr="\n  ".join(logs)))
+    logstr="\n  ".join(logrec for (ip, logrec) in sorted(logs))))
 
     recipients = [myaddr]
     msg["Subject"] = "%sCommunity cleanup: logged requests" % ("TESTING: " if testing else "",)
