@@ -51,9 +51,22 @@ from email.mime.text import MIMEText
 
 
 SEND_PAGES = 3
+IPS_LIMIT = 4
+TEST_IPS = ("23.16.26.111", "216.232.223.192", "174.94.137.145")
 CHECK_COINHIVE = "check_coinhive"
 WEAK_AVTECH = "weak_avtech"
 MACROS = (CHECK_COINHIVE, WEAK_AVTECH)
+
+SHODAN_TIMEOUT = 15
+SHODAN_LARGE_TIMEOUT = 45
+URL_TIMEOUT = 5
+REPEAT_SLEEP = 5
+NETWORK_ERRORS = (socket.timeout, socket.error, socket.herror, socket.gaierror,
+        OSError,
+        BadStatusLine, CannotSendRequest,
+        ConnectionRefusedError, ConnectionResetError, 
+        URLError)
+
 
 class Usage(SystemExit):
     def __init__(self, message=None):
@@ -81,16 +94,6 @@ def local_timestamp(s_since_epoch=None):
         utcoff = -utcoff
     strtime += ("%s%02d%02d" % (utcsign, utcoff // 3600, (utcoff % 3600) // 60))
     return strtime
-
-
-SHODAN_TIMEOUT = 15
-URL_TIMEOUT = 5
-REPEAT_SLEEP = 5
-NETWORK_ERRORS = (socket.timeout, socket.error, socket.herror, socket.gaierror,
-        OSError,
-        BadStatusLine, CannotSendRequest,
-        ConnectionRefusedError, ConnectionResetError, 
-        URLError)
 
 
 def process_http_error(e, quiet=False):
@@ -138,7 +141,12 @@ def resilient_send(req, timeout=URL_TIMEOUT, repeatsleep=REPEAT_SLEEP, debugleve
                 break
         except HTTPError as e:
             (code, body) = process_http_error(e, True)
-            break
+            backendmsg = str(body)
+            if "timed out" in backendmsg:
+                # A backend timed out.  Rinse, repeat.
+                pass
+            else:
+                break
         except NETWORK_ERRORS as e:
             log_network_error(e, url)
         sleep_with_banner(repeatsleep)
@@ -159,7 +167,7 @@ def myip_shodan(testing, **kwargs):
                 parse.urlencode((
                         ("key", shodan_key),
                     )).encode("ascii")),
-                timeout=SHODAN_TIMEOUT,
+                timeout=kwargs.get("timeout", SHODAN_TIMEOUT),
                 repeatsleep=kwargs.get("repeatsleep", REPEAT_SLEEP),
                 debuglevel=kwargs.get("debuglevel", 0))
 
@@ -187,7 +195,7 @@ def info_shodan(testing, **kwargs):
                 parse.urlencode((
                         ("key", shodan_key),
                     )).encode("ascii")),
-                timeout=SHODAN_TIMEOUT,
+                timeout=kwargs.get("timeout", SHODAN_TIMEOUT),
                 repeatsleep=kwargs.get("repeatsleep", REPEAT_SLEEP),
                 debuglevel=kwargs.get("debuglevel", 0))
 
@@ -284,7 +292,7 @@ def search_shodan(testing, page, **kwargs):
                         ("query", queryargvalue),
                         ("page", page),
                     )).encode("ascii")),
-                timeout=SHODAN_TIMEOUT,
+                timeout=kwargs.get("timeout", SHODAN_TIMEOUT),
                 repeatsleep=kwargs.get("repeatsleep", REPEAT_SLEEP),
                 debuglevel=kwargs.get("debuglevel", 0))
 
@@ -402,8 +410,9 @@ def check(httpfilter, baseurl, opener, findings=None):
             finding = "Got {bodysearch!r} in {url}{headersinfo}".format(bodysearch=bodysearch,
                 url=url,
                 headersinfo=(" with %s" % (headers[0][0].decode("ascii"),) if len(headers) > 0 else ""))
-            sys.stderr.write("  %s\n" % (finding,))
-            if findings is not None:
+            if findings is None:
+                sys.stderr.write("  %s\n" % (finding,))
+            else:
                 findings.append(finding)
             return True
 
@@ -418,7 +427,7 @@ def log_hosts(testing, hosts, openers, httpfilters, debuglevel=0):
         port = hostrec["port"]
         is_ssl = "ssl" in hostrec
         url = "http%s://%s:%s" % ("s" if is_ssl else "", host, port)
-        sys.stderr.write("%s\n" % (url,))
+        sys.stderr.write("  %s\n" % (url,))
 
         product = hostrec.get("product", "").lower()
         if "avtech" in product:
@@ -428,7 +437,7 @@ def log_hosts(testing, hosts, openers, httpfilters, debuglevel=0):
             macro = CHECK_COINHIVE
             vuln = "Infected with Coinhive"
         else:
-            sys.stderr.write("  %s\n" % ("No product" if product is None
+            sys.stderr.write("    %s\n" % ("No product" if product is None
                 else "Unexpected product %s" % (product,)))
             continue
         httpfilter = httpfilters[macro]
@@ -448,14 +457,14 @@ def log_hosts(testing, hosts, openers, httpfilters, debuglevel=0):
                     vuln=vuln,
                     finds=", ".join(findings))
             logs.append(logrec)
-            sys.stderr.write("  %s\n" % (logrec,))
+            sys.stderr.write("    %s\n" % (logrec,))
     return logs
 
 
-def filter_hosts(testing, infected_hosts, openers, httpfilter, ready_emails, all_emails, debuglevel=0):
+def filter_hosts(testing, hosts, openers, httpfilter, ready_emails, all_emails, debuglevel=0):
     page_emails = {}
 
-    for (host, port, is_ssl) in infected_hosts:
+    for (host, port, is_ssl) in hosts:
         sys.stderr.write("%s\n" % (host,))
         url = "http%s://%s:%s" % ("s" if is_ssl else "", host, port)
 
@@ -517,7 +526,7 @@ def send_logs_mail(testing, myaddr, myipaddr, rerun, logs):
     if testing:
         sys.stderr.write("Testing email for %s by sending it just to myself...\n" % (rerun,))
     else:
-        sys.stderr.write("Sending email to %s...\n" % (rerun,))
+        sys.stderr.write("Sending email for %s to myself...\n" % (rerun,))
     msg = MIMEText("""
 Hello {rerun},
 
@@ -642,6 +651,29 @@ def next_arg(argv, i):
     return (i, argv[i])
 
 
+def chunks(seq, n):
+    """
+    Yield successive n-sized chunks from seq.
+
+    >>> tuple(chunks(range(14), 3))
+    ((0, 1, 2), (3, 4, 5), (6, 7, 8), (9, 10, 11), (12, 13))
+
+    >>> tuple(chunks(range(12), 3))
+    ((0, 1, 2), (3, 4, 5), (6, 7, 8), (9, 10, 11))
+    """
+    it = iter(seq)
+    while True:
+        chunk = []
+        for i in range(n):
+            try:
+                chunk.append(next(it))
+            except StopIteration:
+                if i > 0:
+                    yield tuple(chunk)
+                return
+        yield tuple(chunk)
+
+
 def main(argv):
     sys.stdout = wrap_once(sys.stdout, AutoFlush)
     sys.stderr = wrap_once(sys.stderr, AutoFlush)
@@ -734,24 +766,34 @@ def main(argv):
             if shodan_code == 200:
                 sys.stderr.write("My IP: %s\n" % (myip,))
                 myipaddr = ip_address(myip)
-                ips = ",".join(str(ip) for ip in all_emails[rerun])
-                page = 1
+                ips = tuple(ip_address(ip) for ip in TEST_IPS) if testing else all_emails[rerun]
                 logs = []
-                while True:
-                    (shodan_code, shodan_results) = search_shodan(testing, page,
-                            ip=ips,
-                            debuglevel=debuglevel)
-                    if shodan_code != 200:
-                        sys.stderr.write("Unexpected Shodan response:\n%s\n" % (pformat(shodan_results),))
+                continue_chunks = True
+                for ips_chunk in chunks(ips, IPS_LIMIT):
+                    ips_chunk_str = ",".join(str(ip) for ip in ips_chunk)
+                    page = 1
+                    while True:
+                        (shodan_code, shodan_results) = search_shodan(testing, page,
+                                ip=ips_chunk_str,
+                                debuglevel=debuglevel,
+                                timeout=SHODAN_LARGE_TIMEOUT)
+                        if shodan_code != 200:
+                            sys.stderr.write("Unexpected Shodan code %d, response:\n%s\n" % (shodan_code, pformat(shodan_results),))
+                            continue_chunks = False
+                            break
+                        nummatches = len(shodan_results["matches"])
+                        if nummatches == 0:
+                            sys.stderr.write("  No more matches\n")
+                            break
+                        # sys.stderr.write("  Found matches: {nummatches}\n".format(nummatches=nummatches))
+                        hosts = tuple(match for match in shodan_results["matches"]
+                                    if "http" in match)
+                        numhosts = len(hosts)
+                        sys.stderr.write("  Found HTTP(S) services: {numhosts}\n".format(numhosts=numhosts))
+                        logs.extend(log_hosts(testing, hosts, openers, httpfilters, debuglevel=debuglevel))
+                        page += 1
+                    if not continue_chunks:
                         break
-                    numhosts = len(shodan_results["matches"])
-                    sys.stderr.write("Found matches: {numhosts}\n".format(numhosts=numhosts))
-                    if numhosts == 0:
-                        break
-                    hosts = tuple(match for match in shodan_results["matches"]
-                                if "http" in match)
-                    logs.extend(log_hosts(testing, hosts, openers, httpfilters, debuglevel=debuglevel))
-                    page += 1
                 send_logs_mail(testing, myaddr, myipaddr, rerun, logs)
     else:
         httpfilter = httpfilters[macro]
@@ -769,18 +811,21 @@ def main(argv):
                         product=product, country=country, component=component,
                         debuglevel=debuglevel)
                 if shodan_code != 200:
-                    sys.stderr.write("Unexpected Shodan response:\n%s\n" % (pformat(shodan_results),))
+                    sys.stderr.write("Unexpected Shodan code %d, response:\n%s\n" % (shodan_code, pformat(shodan_results),))
                     break
 
-                numhosts = len(shodan_results["matches"])
-                sys.stderr.write("Found matches: {numhosts}\n".format(numhosts=numhosts))
-                if numhosts == 0:
+                nummatches = len(shodan_results["matches"])
+                if nummatches == 0:
+                    sys.stderr.write("  No more matches\n")
                     break
-                infected_hosts = tuple((ip_address(match["ip"]), match["port"], "ssl" in match)
+                # sys.stderr.write("  Found matches: {nummatches}\n".format(nummatches=nummatches))
+                hosts = tuple((ip_address(match["ip"]), match["port"], "ssl" in match)
                         for match in shodan_results["matches"]
                             if "http" in match)
+                numhosts = len(hosts)
+                sys.stderr.write("  Found HTTP(S) services: {numhosts}\n".format(numhosts=numhosts))
 
-                filter_hosts(testing, infected_hosts, openers, httpfilter, ready_emails, all_emails, debuglevel=debuglevel)
+                filter_hosts(testing, hosts, openers, httpfilter, ready_emails, all_emails, debuglevel=debuglevel)
                 page += 1
                 page_sender_count += 1
                 if page_sender_count == SEND_PAGES:
