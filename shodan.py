@@ -409,7 +409,7 @@ def check(httpfilter, baseurl, opener, findings=None):
         if bodysearch.lower() in body.lower():
             finding = "Got {bodysearch!r} in {url}{headersinfo}".format(bodysearch=bodysearch,
                 url=url,
-                headersinfo=(" with %s" % (headers[0][0].decode("ascii"),) if len(headers) > 0 else ""))
+                headersinfo=(" with default %s" % (headers[0][0].decode("ascii"),) if len(headers) > 0 else ""))
             if findings is None:
                 sys.stderr.write("  %s\n" % (finding,))
             else:
