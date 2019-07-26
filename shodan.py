@@ -3,7 +3,7 @@
 r"""
 Usage:
 
-    python3 {script} [-t] \
+    python3 {script} [-t] [--to-myself-only] \
             [--product PRODUCT] \
             [--country COUNTRY] \
             [--component COMPONENT] \
@@ -21,13 +21,14 @@ e.g.,
 
     python3 {script} -t --macro {WEAK_AVTECH} --url http://SUSPECT:PORT
 
-    python3 {script} -t --rerun abuse@telus.com
+    python3 {script} --to-myself-only --rerun abuse@telus.com
 
-    python3 {script} -t --rerun '.*\.ca$'
+    python3 {script} --to-myself-only --rerun '.*\.ca$'
 
-Using -t or an existing email address in --rerun will limit recipients to
-oneself.
+Using --to-myself-only will limit recipients to oneself.
 
+Using -t will spare from using Shodan when testing code changes.  This will
+also limit email recipients to oneself.
 {message}
 """
 
@@ -368,8 +369,8 @@ def read_sent_emails(sent_name):
     return sent_emails
 
 
-def write_sent_emails(testing, sent_name, sent_emails):
-    if testing:
+def write_sent_emails(testing, to_myself_only, sent_name, sent_emails):
+    if testing or to_myself_only:
         return
     with open(os.path.expanduser(sent_name), "w") as f:
         for e in sorted(sent_emails.keys()):
@@ -530,17 +531,18 @@ def extract_thing(shodanquery):
         return ""
 
 
-def send_logs_mail(testing, send_to_myself_only, myaddr, myipaddr,
+def send_logs_mail(testing,
+        myaddr, to_myself_only, myipaddr,
         rerun, logs):
     if len(logs) == 0:
-        if send_to_myself_only:
-            sys.stderr.write("Nothing to send by email to myself for %s.\n" % (rerun,))
+        if to_myself_only:
+            sys.stderr.write("Nothing to send by email for %s (to myself).\n" % (rerun,))
         return
     if testing:
         sys.stderr.write("Testing email for %s by sending it just to myself...\n" % (rerun,))
     else:
         sys.stderr.write("Sending email for %s%s...\n" % (rerun, 
-                " to myself" if send_to_myself_only else ""))
+                " to myself" if to_myself_only else ""))
     msg = MIMEText("""
 Hello {rerun},
 
@@ -583,7 +585,7 @@ https://github.com/frantic-search/community-cleanup
     logstr="\n  ".join(logrec for (ip, logrec) in sorted(logs))))
 
     recipients = [myaddr]
-    if not testing and not send_to_myself_only:
+    if not testing and not to_myself_only:
         recipients.append(rerun)
     msg["Subject"] = "%sCommunity cleanup checking back" % ("TESTING: " if testing else "",)
     msg["From"] = myaddr
@@ -593,9 +595,11 @@ https://github.com/frantic-search/community-cleanup
     s.quit()
 
 
-def send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro):
+def send_mail(testing,
+        ready_emails, myaddr, to_myself_only,
+        shodanquery, product, component, macro):
     if len(ready_emails) == 0:
-        sys.stderr.write("Nothing to send by email.\n")
+        sys.stderr.write("Nothing to send by email from the last few pages of the results.\n")
         return
     if macro == WEAK_AVTECH:
         prodname = "AVTech"
@@ -616,7 +620,8 @@ def send_mail(testing, ready_emails, myaddr, shodanquery, product, component, ma
         if testing:
             sys.stderr.write("Testing email for %s by sending it just to myself...\n" % (e,))
         else:
-            sys.stderr.write("Sending email to %s...\n" % (e,))
+            sys.stderr.write("Sending an email for %s%s...\n" % (e,
+                    " to myself" if to_myself_only else ""))
         ehosts = ready_emails[e]
         msg = MIMEText("""
 Hello %s,
@@ -634,7 +639,7 @@ https://github.com/frantic-search/community-cleanup
     "\n  ".join(str(ehost) for ehost in ehosts)))
 
         recipients = [myaddr]
-        if not testing:
+        if not testing and not to_myself_only:
             recipients.append(e)
         msg["Subject"] = "%sCommunity cleanup: your %s needs attention" % ("TESTING: " if testing else "",
                 prodname,)
@@ -669,7 +674,7 @@ def chunks(seq, n):
 
 
 def recheck(testing, rerun, ips,
-        myaddr, myipaddr, send_to_myself_only,
+        myaddr, myipaddr, to_myself_only,
         openers, httpfilters,
         debuglevel):
     if testing:
@@ -703,12 +708,12 @@ def recheck(testing, rerun, ips,
             page += 1
         if not continue_chunks:
             break
-    send_logs_mail(testing, send_to_myself_only, myaddr, myipaddr, rerun, logs)
+    send_logs_mail(testing, myaddr, to_myself_only, myipaddr, rerun, logs)
 
 
 def search_and_mail(testing, checkurl,
         shodanquery, product, country, component, macro, 
-        all_emails, sent_name, myaddr,
+        all_emails, sent_name, myaddr, to_myself_only,
         httpfilter, openers, 
         debuglevel):
     ready_emails = {}
@@ -747,8 +752,9 @@ def search_and_mail(testing, checkurl,
             page += 1
             page_sender_count += 1
             if page_sender_count == SEND_PAGES:
-                send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro)
-                write_sent_emails(testing, sent_name, all_emails)
+                send_mail(testing, ready_emails, myaddr, to_myself_only,
+                        shodanquery, product, component, macro)
+                write_sent_emails(testing, to_myself_only, sent_name, all_emails)
                 ready_emails = {}
                 page_sender_count = 0
     else:
@@ -759,8 +765,9 @@ def search_and_mail(testing, checkurl,
                 httpfilter,
                 ready_emails, all_emails, debuglevel=debuglevel)
 
-    send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro)
-    write_sent_emails(testing, sent_name, all_emails)
+    send_mail(testing, ready_emails, myaddr, to_myself_only,
+            shodanquery, product, component, macro)
+    write_sent_emails(testing, to_myself_only, sent_name, all_emails)
 
 
 class AutoFlush:
@@ -796,6 +803,7 @@ def main(argv):
     unittesting = False
     debuglevel = 0
     testing = False
+    to_myself_only = False
     shodanquery = None
     product = None
     country = None
@@ -810,6 +818,8 @@ def main(argv):
             debuglevel = 1
         elif arg == "-t":
             testing = True
+        elif arg == "--to-myself-only":
+            to_myself_only = True
         elif arg == "-u":
             unittesting = True
         elif arg == "--query":
@@ -878,19 +888,19 @@ def main(argv):
                 myipaddr = ip_address(myip)
                 if rerun in all_emails:
                     recheck(testing, rerun, all_emails[rerun],
-                            myaddr, myipaddr, True,
+                            myaddr, myipaddr, to_myself_only,
                             openers, httpfilters, debuglevel)
                 else:
                     emailpat = re.compile(rerun)
                     for e in sorted(all_emails.keys()):
                         if emailpat.match(e):
                             recheck(testing, e, all_emails[e],
-                                    myaddr, myipaddr, False,
+                                    myaddr, myipaddr, to_myself_only,
                                     openers, httpfilters, debuglevel)
     else:
         search_and_mail(testing, checkurl,
                 shodanquery, product, country, component, macro, 
-                all_emails, sent_name, myaddr,
+                all_emails, sent_name, myaddr, to_myself_only,
                 httpfilter, openers,
                 debuglevel)
 
