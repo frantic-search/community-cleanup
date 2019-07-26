@@ -545,7 +545,8 @@ def send_logs_mail(testing, send_to_myself_only, myaddr, myipaddr,
 Hello {rerun},
 
 The following address(es) appeared vulnerable to abuse and botnets, according
-to the shown requests from the IP address {myipaddr}.
+to the requests shown below.  This initiative sent the requests from the IP
+address {myipaddr}.
 
   {logstr}
 
@@ -584,7 +585,7 @@ https://github.com/frantic-search/community-cleanup
     recipients = [myaddr]
     if not testing and not send_to_myself_only:
         recipients.append(rerun)
-    msg["Subject"] = "%sCommunity cleanup: logged requests" % ("TESTING: " if testing else "",)
+    msg["Subject"] = "%sCommunity cleanup checking back" % ("TESTING: " if testing else "",)
     msg["From"] = myaddr
     msg["To"] = rerun
     s = smtplib.SMTP("localhost")
