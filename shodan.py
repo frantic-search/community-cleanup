@@ -9,7 +9,7 @@ Usage:
             [--component COMPONENT] \
             [--macro MACRO] \
             [--url httpX://HOST:PORT]
-            [--rerun EMAIL]
+            [--rerun (EMAIL|REGEX)]
 
 e.g.,
 
@@ -22,6 +22,12 @@ e.g.,
     python3 {script} -t --macro {WEAK_AVTECH} --url http://SUSPECT:PORT
 
     python3 {script} -t --rerun abuse@telus.com
+
+    python3 {script} -t --rerun '.*\.ca$'
+
+Using -t or an existing email address in --rerun will limit recipients to
+oneself.
+
 {message}
 """
 
@@ -48,6 +54,7 @@ from ipaddress import ip_address, IPv4Address, IPv6Address
 import struct, socket, sys
 import smtplib
 from email.mime.text import MIMEText
+import re
 
 
 SEND_PAGES = 3
@@ -144,6 +151,7 @@ def resilient_send(req, timeout=URL_TIMEOUT, repeatsleep=REPEAT_SLEEP, debugleve
             backendmsg = str(body)
             if "timed out" in backendmsg:
                 # A backend timed out.  Rinse, repeat.
+                sys.stderr.write("  *** Backend time out\n")
                 pass
             else:
                 break
@@ -461,7 +469,7 @@ def log_hosts(testing, hosts, openers, httpfilters, debuglevel=0):
     return logs
 
 
-def filter_hosts(testing, hosts, openers, httpfilter, ready_emails, all_emails, debuglevel=0):
+def record_hosts(testing, hosts, openers, httpfilter, ready_emails, all_emails, debuglevel=0):
     page_emails = {}
 
     for (host, port, is_ssl) in hosts:
@@ -522,11 +530,17 @@ def extract_thing(shodanquery):
         return ""
 
 
-def send_logs_mail(testing, myaddr, myipaddr, rerun, logs):
+def send_logs_mail(testing, send_to_myself_only, myaddr, myipaddr,
+        rerun, logs):
+    if len(logs) == 0:
+        if send_to_myself_only:
+            sys.stderr.write("Nothing to send by email to myself for %s.\n" % (rerun,))
+        return
     if testing:
         sys.stderr.write("Testing email for %s by sending it just to myself...\n" % (rerun,))
     else:
-        sys.stderr.write("Sending email for %s to myself...\n" % (rerun,))
+        sys.stderr.write("Sending email for %s%s...\n" % (rerun, 
+                " to myself" if send_to_myself_only else ""))
     msg = MIMEText("""
 Hello {rerun},
 
@@ -568,15 +582,20 @@ https://github.com/frantic-search/community-cleanup
     logstr="\n  ".join(logrec for (ip, logrec) in sorted(logs))))
 
     recipients = [myaddr]
+    if not testing and not send_to_myself_only:
+        recipients.append(rerun)
     msg["Subject"] = "%sCommunity cleanup: logged requests" % ("TESTING: " if testing else "",)
     msg["From"] = myaddr
-    msg["To"] = myaddr
+    msg["To"] = rerun
     s = smtplib.SMTP("localhost")
     s.sendmail(myaddr, recipients, msg.as_string())
     s.quit()
 
 
 def send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro):
+    if len(ready_emails) == 0:
+        sys.stderr.write("Nothing to send by email.\n")
+        return
     if macro == WEAK_AVTECH:
         prodname = "AVTech"
     elif product:
@@ -625,6 +644,124 @@ https://github.com/frantic-search/community-cleanup
         s.quit()
 
 
+def chunks(seq, n):
+    """
+    Yield successive n-sized chunks from seq.
+
+    >>> tuple(chunks(range(14), 3))
+    ((0, 1, 2), (3, 4, 5), (6, 7, 8), (9, 10, 11), (12, 13))
+
+    >>> tuple(chunks(range(12), 3))
+    ((0, 1, 2), (3, 4, 5), (6, 7, 8), (9, 10, 11))
+    """
+    it = iter(seq)
+    while True:
+        chunk = []
+        for i in range(n):
+            try:
+                chunk.append(next(it))
+            except StopIteration:
+                if i > 0:
+                    yield tuple(chunk)
+                return
+        yield tuple(chunk)
+
+
+def recheck(testing, rerun, ips,
+        myaddr, myipaddr, send_to_myself_only,
+        openers, httpfilters,
+        debuglevel):
+    if testing:
+        ips = tuple(ip_address(ip) for ip in TEST_IPS)
+    logs = []
+    continue_chunks = True
+    for ips_chunk in chunks(ips, IPS_LIMIT):
+        ips_chunk_str = ",".join(str(ip) for ip in ips_chunk)
+        page = 1
+        while True:
+            (shodan_code, shodan_results) = search_shodan(testing, page,
+                    ip=ips_chunk_str,
+                    debuglevel=debuglevel,
+                    timeout=SHODAN_LARGE_TIMEOUT)
+            if shodan_code != 200:
+                sys.stderr.write("Unexpected Shodan code %d, response:\n%s\n" % (shodan_code, pformat(shodan_results),))
+                continue_chunks = False
+                break
+            nummatches = len(shodan_results["matches"])
+            if nummatches == 0:
+                sys.stderr.write("  No more matches\n")
+                break
+            # sys.stderr.write("  Found matches: {nummatches}\n".format(nummatches=nummatches))
+            hosts = tuple(match for match in shodan_results["matches"]
+                        if "http" in match)
+            numhosts = len(hosts)
+            sys.stderr.write("  Found HTTP(S) services: {numhosts}"
+                    " (out of {nummatches} matches)\n".format(numhosts=numhosts,
+                        nummatches=nummatches))
+            logs.extend(log_hosts(testing, hosts, openers, httpfilters, debuglevel=debuglevel))
+            page += 1
+        if not continue_chunks:
+            break
+    send_logs_mail(testing, send_to_myself_only, myaddr, myipaddr, rerun, logs)
+
+
+def search_and_mail(testing, checkurl,
+        shodanquery, product, country, component, macro, 
+        all_emails, sent_name, myaddr,
+        httpfilter, openers, 
+        debuglevel):
+    ready_emails = {}
+    if checkurl is None:
+        page = 1
+        page_sender_count = 0
+        while True:
+            (shodan_code, shodan_limits) = info_shodan(testing, debuglevel=debuglevel)
+            sys.stderr.write("Shodan code %d, limits:\n%s\n" % (shodan_code, pformat(shodan_limits),))
+            if shodan_code != 200:
+                break
+
+            (shodan_code, shodan_results) = search_shodan(testing, page,
+                    query=shodanquery,
+                    product=product, country=country, component=component,
+                    debuglevel=debuglevel)
+            if shodan_code != 200:
+                sys.stderr.write("Unexpected Shodan code %d, response:\n%s\n" % (shodan_code, pformat(shodan_results),))
+                break
+
+            nummatches = len(shodan_results["matches"])
+            if nummatches == 0:
+                sys.stderr.write("  No more matches\n")
+                break
+            # sys.stderr.write("  Found matches in page {page}: {nummatches}\n".format(page=page, 
+            #         nummatches=nummatches))
+            hosts = tuple((ip_address(match["ip"]), match["port"], "ssl" in match)
+                    for match in shodan_results["matches"]
+                        if "http" in match)
+            numhosts = len(hosts)
+            sys.stderr.write("  Found HTTP(S) services: {numhosts}"
+                    " (out of {nummatches} matches)\n".format(numhosts=numhosts,
+                        nummatches=nummatches))
+
+            record_hosts(testing, hosts, openers, httpfilter, ready_emails, all_emails, debuglevel=debuglevel)
+            page += 1
+            page_sender_count += 1
+            if page_sender_count == SEND_PAGES:
+                send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro)
+                write_sent_emails(testing, sent_name, all_emails)
+                ready_emails = {}
+                page_sender_count = 0
+    else:
+        urlobj = parse.urlparse(checkurl)
+        record_hosts(testing,
+                ((urlobj.hostname, urlobj.port, urlobj.scheme == "https"),),
+                openers,
+                httpfilter,
+                ready_emails, all_emails, debuglevel=debuglevel)
+
+    send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro)
+    write_sent_emails(testing, sent_name, all_emails)
+
+
 class AutoFlush:
     def __init__(self, out):
         self._out = out
@@ -649,29 +786,6 @@ def next_arg(argv, i):
     if i >= len(argv):
         raise Usage()
     return (i, argv[i])
-
-
-def chunks(seq, n):
-    """
-    Yield successive n-sized chunks from seq.
-
-    >>> tuple(chunks(range(14), 3))
-    ((0, 1, 2), (3, 4, 5), (6, 7, 8), (9, 10, 11), (12, 13))
-
-    >>> tuple(chunks(range(12), 3))
-    ((0, 1, 2), (3, 4, 5), (6, 7, 8), (9, 10, 11))
-    """
-    it = iter(seq)
-    while True:
-        chunk = []
-        for i in range(n):
-            try:
-                chunk.append(next(it))
-            except StopIteration:
-                if i > 0:
-                    yield tuple(chunk)
-                return
-        yield tuple(chunk)
 
 
 def main(argv):
@@ -722,31 +836,28 @@ def main(argv):
         (failures, tests) = doctest.testmod(verbose=(not not debuglevel))
         raise SystemExit(0 if failures == 0 else 1 + (failures % 127))
 
-    if checkurl:
-        if not macro:
-            raise Usage("The --url argument will benefit from using a macro to check it")
+    if not (rerun or shodanquery or product or country or component or macro):
+        raise Usage()
 
-        if shodanquery or product or country or component:
-            raise Usage("The --url argument overrides Shodan search")
-    elif rerun:
+    if rerun:
         if shodanquery or product or country or component or macro:
             raise Usage("The --rerun argument overrides Shodan search")
     else:
-        numcond = len(list(filter(bool, (shodanquery, product, country, component, macro))))
-        if numcond == 0:
-            raise Usage()
-        elif numcond < 2:
-            raise Usage("The search will benefit from using at least 2 conditions")
-
+        if checkurl:
+            if shodanquery or product or country or component:
+                raise Usage("The --url argument overrides Shodan search")
+        else:
+            if not (shodanquery or product or country or component):
+                raise Usage("The search will benefit from using a condition")
 
     myaddr = "\"Community Cleanup Initiative\" <community_cleanup@yahoo.com>"
     sent_name = "email-hosts.txt"
     all_emails = read_sent_emails(sent_name)
-    ready_emails = {}
 
     httpfilters = {}
-    for m in MACROS:
+    for m in (None,) + MACROS:
         httpfilters[m] = build_httpfilter(m)
+    httpfilter = httpfilters[macro]
 
     openers = {}
     for is_ssl in (False, True):
@@ -757,8 +868,6 @@ def main(argv):
         openers[is_ssl] = request.build_opener(handler)
 
     if rerun:
-        if rerun not in all_emails:
-            raise Usage("The --rerun argument selects past findings by an email address")
         (shodan_code, shodan_limits) = info_shodan(testing, debuglevel=debuglevel)
         sys.stderr.write("Shodan code %d, limits:\n%s\n" % (shodan_code, pformat(shodan_limits),))
         if shodan_code == 200:
@@ -766,84 +875,23 @@ def main(argv):
             if shodan_code == 200:
                 sys.stderr.write("My IP: %s\n" % (myip,))
                 myipaddr = ip_address(myip)
-                ips = tuple(ip_address(ip) for ip in TEST_IPS) if testing else all_emails[rerun]
-                logs = []
-                continue_chunks = True
-                for ips_chunk in chunks(ips, IPS_LIMIT):
-                    ips_chunk_str = ",".join(str(ip) for ip in ips_chunk)
-                    page = 1
-                    while True:
-                        (shodan_code, shodan_results) = search_shodan(testing, page,
-                                ip=ips_chunk_str,
-                                debuglevel=debuglevel,
-                                timeout=SHODAN_LARGE_TIMEOUT)
-                        if shodan_code != 200:
-                            sys.stderr.write("Unexpected Shodan code %d, response:\n%s\n" % (shodan_code, pformat(shodan_results),))
-                            continue_chunks = False
-                            break
-                        nummatches = len(shodan_results["matches"])
-                        if nummatches == 0:
-                            sys.stderr.write("  No more matches\n")
-                            break
-                        # sys.stderr.write("  Found matches: {nummatches}\n".format(nummatches=nummatches))
-                        hosts = tuple(match for match in shodan_results["matches"]
-                                    if "http" in match)
-                        numhosts = len(hosts)
-                        sys.stderr.write("  Found HTTP(S) services: {numhosts}\n".format(numhosts=numhosts))
-                        logs.extend(log_hosts(testing, hosts, openers, httpfilters, debuglevel=debuglevel))
-                        page += 1
-                    if not continue_chunks:
-                        break
-                send_logs_mail(testing, myaddr, myipaddr, rerun, logs)
+                if rerun in all_emails:
+                    recheck(testing, rerun, all_emails[rerun],
+                            myaddr, myipaddr, True,
+                            openers, httpfilters, debuglevel)
+                else:
+                    emailpat = re.compile(rerun)
+                    for e in sorted(all_emails.keys()):
+                        if emailpat.match(e):
+                            recheck(testing, e, all_emails[e],
+                                    myaddr, myipaddr, False,
+                                    openers, httpfilters, debuglevel)
     else:
-        httpfilter = httpfilters[macro]
-        if checkurl is None:
-            page = 1
-            page_sender_count = 0
-            while True:
-                (shodan_code, shodan_limits) = info_shodan(testing, debuglevel=debuglevel)
-                sys.stderr.write("Shodan code %d, limits:\n%s\n" % (shodan_code, pformat(shodan_limits),))
-                if shodan_code != 200:
-                    break
-
-                (shodan_code, shodan_results) = search_shodan(testing, page,
-                        query=shodanquery,
-                        product=product, country=country, component=component,
-                        debuglevel=debuglevel)
-                if shodan_code != 200:
-                    sys.stderr.write("Unexpected Shodan code %d, response:\n%s\n" % (shodan_code, pformat(shodan_results),))
-                    break
-
-                nummatches = len(shodan_results["matches"])
-                if nummatches == 0:
-                    sys.stderr.write("  No more matches\n")
-                    break
-                # sys.stderr.write("  Found matches: {nummatches}\n".format(nummatches=nummatches))
-                hosts = tuple((ip_address(match["ip"]), match["port"], "ssl" in match)
-                        for match in shodan_results["matches"]
-                            if "http" in match)
-                numhosts = len(hosts)
-                sys.stderr.write("  Found HTTP(S) services: {numhosts}\n".format(numhosts=numhosts))
-
-                filter_hosts(testing, hosts, openers, httpfilter, ready_emails, all_emails, debuglevel=debuglevel)
-                page += 1
-                page_sender_count += 1
-                if page_sender_count == SEND_PAGES:
-                    send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro)
-                    write_sent_emails(testing, sent_name, all_emails)
-                    ready_emails = {}
-                    page_sender_count = 0
-
-        else:
-            urlobj = parse.urlparse(checkurl)
-            filter_hosts(testing,
-                    ((urlobj.hostname, urlobj.port, urlobj.scheme == "https"),),
-                    openers,
-                    httpfilter,
-                    ready_emails, all_emails, debuglevel=debuglevel)
-
-        send_mail(testing, ready_emails, myaddr, shodanquery, product, component, macro)
-        write_sent_emails(testing, sent_name, all_emails)
+        search_and_mail(testing, checkurl,
+                shodanquery, product, country, component, macro, 
+                all_emails, sent_name, myaddr,
+                httpfilter, openers,
+                debuglevel)
 
 
 if __name__ == "__main__":
