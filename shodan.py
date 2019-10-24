@@ -295,12 +295,13 @@ def search_shodan(testing, page, **kwargs):
     with open(os.path.expanduser("~/.shodan")) as f:
         shodan_key = f.read().strip()
 
-    return resilient_send(request.Request(url,
+    return resilient_send(request.Request("%s?%s" % (url,
                 parse.urlencode((
                         ("key", shodan_key),
                         ("query", queryargvalue),
                         ("page", page),
-                    )).encode("ascii")),
+                    ))),
+                    method="GET"),
                 timeout=kwargs.get("timeout", SHODAN_TIMEOUT),
                 repeatsleep=kwargs.get("repeatsleep", REPEAT_SLEEP),
                 debuglevel=kwargs.get("debuglevel", 0))
