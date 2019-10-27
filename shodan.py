@@ -64,6 +64,10 @@ TEST_IPS = ("23.16.26.111", "216.232.223.192", "174.94.137.145")
 CHECK_COINHIVE = "check_coinhive"
 WEAK_AVTECH = "weak_avtech"
 MACROS = (CHECK_COINHIVE, WEAK_AVTECH)
+MACRO_VULNS = {
+        CHECK_COINHIVE: "Infected MikroTik",
+        WEAK_AVTECH: "Weak AVTech"
+    }
 
 SHODAN_TIMEOUT = 15
 SHODAN_LARGE_TIMEOUT = 45
@@ -396,7 +400,7 @@ def build_httpfilter(macro):
     return httpfilter
 
 
-def check(httpfilter, baseurl, opener, findings=None):
+def check(macro, httpfilter, baseurl, opener, findings=None):
     if len(httpfilter) == 0:
         # Assume the host vulnerable in the absence of HTTP checks
         return True
@@ -426,7 +430,7 @@ def check(httpfilter, baseurl, opener, findings=None):
                 findings.append(finding)
             return True
 
-    sys.stderr.write("  *** The product appears protected at %s\n" % (baseurl,))
+    sys.stderr.write("  *** The product appears protected against %s at %s\n" % (macro, baseurl,))
     return False
 
 
@@ -440,45 +444,46 @@ def log_hosts(testing, hosts, openers, httpfilters, debuglevel=0):
         sys.stderr.write("  %s\n" % (url,))
 
         product = hostrec.get("product", "").lower()
-        if "avtech" in product:
-            macro = WEAK_AVTECH
-            vuln = "Weak AVTech"
-        elif "mikrotik" in product:
-            macro = CHECK_COINHIVE
-            vuln = "Infected MikroTik"
-        else:
+        guessed = False
+        for macro in MACROS:
+            product_guess = macro.split("_")[1]
+            if (product_guess in product) or (len(product.strip()) == 0):
+                guessed = True
+                vuln = MACRO_VULNS[macro]
+            else:
+                continue
+            httpfilter = httpfilters[macro]
+            findings = []
+            ts = local_timestamp()
+            if check(macro, httpfilter, url, openers[is_ssl], findings):
+                if isinstance(host, (IPv4Address, IPv6Address)):
+                    ip = host
+                else:
+                    # isinstance(host, str)
+                    # Convert both 'xx.xx.xx.xx' and 'HOSTNAME' to
+                    # ipaddress.IPvXAddress for soring.
+                    ipstr = socket.gethostbyname(str(host))
+                    ip = ip_address(ipstr)
+                logrec = "{ip!s:>15} {ts} {vuln:<17} {finds}".format(ip=ip,
+                        ts=ts,
+                        vuln=vuln,
+                        finds=", ".join(findings))
+                logs.append((ip, logrec))
+                sys.stderr.write("    %s\n" % (logrec,))
+        if not guessed:
             sys.stderr.write("    %s\n" % ("No product" if product is None
                 else "Unexpected product %s" % (product,)))
-            continue
-        httpfilter = httpfilters[macro]
-        findings = []
-        ts = local_timestamp()
-        if check(httpfilter, url, openers[is_ssl], findings):
-            if isinstance(host, (IPv4Address, IPv6Address)):
-                ip = host
-            else:
-                # isinstance(host, str)
-                # Convert both 'xx.xx.xx.xx' and 'HOSTNAME' to
-                # ipaddress.IPvXAddress for soring.
-                ipstr = socket.gethostbyname(str(host))
-                ip = ip_address(ipstr)
-            logrec = "{ip!s:>15} {ts} {vuln:<17} {finds}".format(ip=ip,
-                    ts=ts,
-                    vuln=vuln,
-                    finds=", ".join(findings))
-            logs.append((ip, logrec))
-            sys.stderr.write("    %s\n" % (logrec,))
     return logs
 
 
-def record_hosts(testing, hosts, openers, httpfilter, ready_emails, all_emails, debuglevel=0):
+def record_hosts(testing, hosts, macro, openers, httpfilter, ready_emails, all_emails, debuglevel=0):
     page_emails = {}
 
     for (host, port, is_ssl) in hosts:
         sys.stderr.write("%s\n" % (host,))
         url = "http%s://%s:%s" % ("s" if is_ssl else "", host, port)
 
-        if check(httpfilter, url, openers[is_ssl]):
+        if check(macro, httpfilter, url, openers[is_ssl]):
             found_emails = False
             if isinstance(host, (IPv4Address, IPv6Address)):
                 ip = host
@@ -749,7 +754,7 @@ def search_and_mail(testing, checkurl,
                     " (out of {nummatches} matches)\n".format(numhosts=numhosts,
                         nummatches=nummatches))
 
-            record_hosts(testing, hosts, openers, httpfilter, ready_emails, all_emails, debuglevel=debuglevel)
+            record_hosts(testing, hosts, macro, openers, httpfilter, ready_emails, all_emails, debuglevel=debuglevel)
             page += 1
             page_sender_count += 1
             if page_sender_count == SEND_PAGES:
@@ -762,6 +767,7 @@ def search_and_mail(testing, checkurl,
         urlobj = parse.urlparse(checkurl)
         record_hosts(testing,
                 ((urlobj.hostname, urlobj.port, urlobj.scheme == "https"),),
+                macro,
                 openers,
                 httpfilter,
                 ready_emails, all_emails, debuglevel=debuglevel)
