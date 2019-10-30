@@ -68,6 +68,10 @@ MACRO_VULNS = {
         CHECK_COINHIVE: "Infected MikroTik",
         WEAK_AVTECH: "Weak AVTech"
     }
+MACRO_PRODUCTS = {
+        CHECK_COINHIVE: "MikroTik",
+        WEAK_AVTECH: "AVTech"
+    }
 
 SHODAN_TIMEOUT = 15
 SHODAN_LARGE_TIMEOUT = 45
@@ -446,7 +450,7 @@ def log_hosts(testing, hosts, openers, httpfilters, debuglevel=0):
         product = hostrec.get("product", "").lower()
         guessed = False
         for macro in MACROS:
-            product_guess = macro.split("_")[1]
+            product_guess = MACRO_PRODUCTS[macro].lower()
             if (product_guess in product) or (len(product.strip()) == 0):
                 guessed = True
                 vuln = MACRO_VULNS[macro]
