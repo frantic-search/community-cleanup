@@ -19,6 +19,9 @@ e.g.,
     python3 {script} -t --query "country:CA avtech" \
             --macro {WEAK_AVTECH}
 
+    python3 {script} -t --query "http.status:200 country:CA" \
+            --component jenkins --macro {WEAK_JENKINS}
+
     python3 {script} -t --macro {WEAK_AVTECH} --url http://SUSPECT:PORT
 
     python3 {script} --to-myself-only --rerun abuse@telus.com
@@ -63,14 +66,110 @@ IPS_LIMIT = 4
 TEST_IPS = ("23.16.26.111", "216.232.223.192", "174.94.137.145")
 CHECK_COINHIVE = "check_coinhive"
 WEAK_AVTECH = "weak_avtech"
-MACROS = (CHECK_COINHIVE, WEAK_AVTECH)
+WEAK_JENKINS = "weak_jenkins"
+MACROS = (CHECK_COINHIVE, WEAK_AVTECH, WEAK_JENKINS)
 MACRO_VULNS = {
         CHECK_COINHIVE: "Infected MikroTik",
-        WEAK_AVTECH: "Weak AVTech"
+        WEAK_AVTECH: "Weak AVTech",
+        WEAK_JENKINS: "Weak Jenkins"
+    }
+MACRO_SMELLS = {
+        CHECK_COINHIVE: "showing Coinhive",
+        WEAK_AVTECH: "exhibiting known exploits or factory-defined authentication",
+        WEAK_JENKINS: "showing Jenkins jobs"
     }
 MACRO_PRODUCTS = {
         CHECK_COINHIVE: "MikroTik",
-        WEAK_AVTECH: "AVTech"
+        WEAK_AVTECH: "AVTech",
+        WEAK_JENKINS: "Jenkins"
+    }
+MACRO_FIXTURES = {
+        CHECK_COINHIVE: [{
+                "ip": 2917626385,
+                "port": 8080,
+                "http": {},
+                "product": "MikroTik http proxy",
+            }, {
+                "ip": 3494743649,
+                "port": 8080,
+                "http": {},
+                "product": "MikroTik http proxy",
+            }],
+        WEAK_AVTECH: [{
+                "ip": 1805602870,
+                "port": 88,
+                "product": "Avtech AVN801 network camera",
+            }, {
+                "ip": 412990438,
+                "port": 8888,
+                "http": {},
+                "product": "Avtech AVN801 network camera",
+            }, {
+                "ip": 2264972081,
+                "port": 88,
+                "http": {},
+                "product": "Avtech AVN801 network camera",
+                }],
+        WEAK_JENKINS: [{
+                "ip": "35.183.208.63",
+                "port": 8080,
+                "http": {},
+                "product": "Jenkins",
+            }]
+    }
+IP_SEARCH_FIXTURES = [
+        {
+            "ip": 386931311,
+            "port": 9090,
+            "http": {},
+            "product": "Avtech AVN801 network camera",
+        },
+        {
+            "ip": 3639140288,
+            "port": 8443,
+            "http": {},
+            "ssl": {},
+        },
+        {
+            "ip": 3639140288,
+            "port": 1723,
+        },
+        {
+            "ip": 2925431185,
+            "port": 8080,
+            "http": {},
+            "product": "MikroTik http proxy",
+        },
+        {
+            "ip": "35.183.208.63",
+            "port": 8080,
+            "http": {},
+            "product": "Jetty",
+        }
+    ]
+MACRO_LEGENDS = {
+        CHECK_COINHIVE: """Adversaries discovered a weakness in the device by
+    taking control of it and setting up Coinhive in its HTML code.  This
+    finding is not exhaustive.  There may be other vulnerable routers or
+    routers that were infected but whose attackers did not set up Coinhive.
+
+        https://www.zdnet.com/article/mikrotik-routers-enslaved-in-massive-coinhive-cryptojacking-campaign/
+
+        https://www.securityweek.com/remotely-exploitable-vulnerability-discovered-mikrotiks-routeros""",
+
+        WEAK_AVTECH: """Adversaries may discover (or already discovered) a chance to
+    take control of the device due to a weakness in the firmware or leaving
+    the default password unchanged.
+
+        https://seclists.org/bugtraq/2016/Oct/26
+
+        https://www.exploit-db.com/exploits/40500""",
+
+        WEAK_JENKINS: """Jenkins servers left without a password protection allow downloading source
+    code, configuration files and build results. The server software and its
+    plugins may have vulnerabilities of varying severities.
+
+        https://www.jenkins.io/security/advisories/"""
     }
 
 SHODAN_TIMEOUT = 15
@@ -89,6 +188,7 @@ class Usage(SystemExit):
         super(Usage, self).__init__(__doc__.format(script=os.path.basename(__file__),
             CHECK_COINHIVE=CHECK_COINHIVE,
             WEAK_AVTECH=WEAK_AVTECH,
+            WEAK_JENKINS=WEAK_JENKINS,
             message=("\nError: %s\n" % (message,) if message else "")))
 
 
@@ -239,66 +339,21 @@ def search_shodan(testing, page, **kwargs):
     if testing:
         if page > 1:
             return (200, {"matches": []})
-
-        qlow =  queryargvalue.lower()
-        if "mikrotik" in qlow:
-            return (200, {"matches": [{
-                        "product": "MikroTik http proxy",
-                        "ip": 2917626385,
-                        "port": 8080
-                        }, {
-                        "product": "MikroTik http proxy",
-                        "ip": 3494743649,
-                        "port": 8080
-                        }]})
-        elif "avtech" in qlow:
-            return (200, {"matches": [{
-                    "product": "Avtech AVN801 network camera",
-                    "ip": 1805602870,
-                    "port": 88
-                }, {
-                    "product": "Avtech AVN801 network camera",
-                    "ip": 412990438,
-                    "port": 8888
-                }, {
-                    "product": "Avtech AVN801 network camera",
-                    "ip": 2264972081,
-                    "port": 88
-                    }]})
-        elif "ip:" in qlow:
+        qlow = queryargvalue.lower()
+        for macro in MACROS:
+            macrolow = MACRO_PRODUCTS[macro].lower()
+            print(macrolow, qlow)
+            if macrolow in qlow:
+                print("OK")
+                return (200, {"matches": MACRO_FIXTURES[macro]})
+        if "ip:" in qlow:
             return (200, {
-                  "matches": [
-                    {
-                      "ip": 386931311,
-                      "port": 9090,
-                      "product": "Avtech AVN801 network camera",
-                      "http": {
-                      },
-                    },
-                    {
-                      "ip": 3639140288,
-                      "port": 8443,
-                      "ssl": {
-                      },
-                      "http": {
-                      },
-                    },
-                    {
-                      "ip": 3639140288,
-                      "port": 1723,
-                    },
-                    {
-                      "product": "MikroTik http proxy",
-                      "ip": 2925431185,
-                      "port": 8080,
-                      "http": {
-                      },
-                    },
-                  ],
-                  "total": 4
-                })
+              "matches": IP_SEARCH_FIXTURES,
+              "total": len(IP_SEARCH_FIXTURES)
+            })
         else:
-            raise Usage("Only MikroTik and AVTech products, as well as IP lookups, are mocked as Shodan results")
+            raise Usage("Only products {products}, as well as IP lookups, are mocked as Shodan results"
+                    .format(products=", ".join(MACRO_PRODUCTS.keys())))
 
     with open(os.path.expanduser("~/.shodan")) as f:
         shodan_key = f.read().strip()
@@ -399,6 +454,10 @@ def build_httpfilter(macro):
         avtech_bodysearch = "Firmware.Version"
         httpfilter.append((avtech_path, (), avtech_bodysearch))
         httpfilter.append((avtech_path, avtech_headers, avtech_bodysearch))
+    elif macro == WEAK_JENKINS:
+        jenkins_path = "/api/json"
+        jenkins_bodysearch = "\"jobs\""
+        httpfilter.append((jenkins_path, (), jenkins_bodysearch))
     else:
         raise Usage("Unknown macro \"%s\"" % (macro,))
     return httpfilter
@@ -440,6 +499,7 @@ def check(macro, httpfilter, baseurl, opener, findings=None):
 
 def log_hosts(testing, hosts, openers, httpfilters, debuglevel=0):
     logs = []
+    found_macros = {}
     for hostrec in hosts:
         host = ip_address(hostrec["ip"])
         port = hostrec["port"]
@@ -460,6 +520,7 @@ def log_hosts(testing, hosts, openers, httpfilters, debuglevel=0):
             findings = []
             ts = local_timestamp()
             if check(macro, httpfilter, url, openers[is_ssl], findings):
+                found_macros[macro] = 1
                 if isinstance(host, (IPv4Address, IPv6Address)):
                     ip = host
                 else:
@@ -477,7 +538,7 @@ def log_hosts(testing, hosts, openers, httpfilters, debuglevel=0):
         if not guessed:
             sys.stderr.write("    %s\n" % ("No product" if product is None
                 else "Unexpected product %s" % (product,)))
-    return logs
+    return found_macros, logs
 
 
 def record_hosts(testing, hosts, macro, openers, httpfilter, ready_emails, all_emails, debuglevel=0):
@@ -543,7 +604,7 @@ def extract_thing(shodanquery):
 
 def send_logs_mail(testing,
         myaddr, to_myself_only, myipaddr,
-        rerun, logs):
+        rerun, matched_macros, logs):
     if len(logs) == 0:
         if to_myself_only:
             sys.stderr.write("Nothing to send by email for %s (to myself).\n" % (rerun,))
@@ -563,28 +624,13 @@ address {myipaddr}.
   {logstr}
 
 Legend:
+    {legend}
 
-    Weak AVTech: attackers may discover (or already discovered) a chance to
-    take control of the device due to a weakness in the firmware or leaving
-    the default password unchanged.
-
-        https://seclists.org/bugtraq/2016/Oct/26
-
-        https://www.exploit-db.com/exploits/40500
-
-    Infected MikroTik: attackers already discovered a weakness in the device by
-    taking control of it and setting up Coinhive in its HTML code.  This
-    finding is not exhaustive.  There may be other vulnerable routers or
-    routers that were infected but whose attackers did not set up Coinhive.
-
-        https://www.zdnet.com/article/mikrotik-routers-enslaved-in-massive-coinhive-cryptojacking-campaign/
-
-        https://www.securityweek.com/remotely-exploitable-vulnerability-discovered-mikrotiks-routeros
-
-    None of these findings imply that the owners of the devices were
-    responsible for malicious activities.  Instead, they became or may become
-    victims of remote attacks.  Once successful, the attackers take control of
-    the device and use it for other activities.
+Reservation:
+    None of these findings imply that the owners of the devices or machines
+    were responsible for malicious activities.  Instead, they became or may
+    become victims of remote attacks.  Once successful, the attackers take
+    control of the device and use it for other activities.
 
 Best regards,
 
@@ -592,7 +638,8 @@ A community cleanup initiative
 https://github.com/frantic-search/community-cleanup
 """.format(rerun=rerun,
     myipaddr=myipaddr,
-    logstr="\n  ".join(logrec for (ip, logrec) in sorted(logs))))
+    logstr="\n  ".join(logrec for (ip, logrec) in sorted(logs)),
+    legend="\n\n".join(("%s: %s" % (MACRO_VULNS[m], MACRO_LEGENDS[m])) for m in matched_macros)))
 
     recipients = [myaddr]
     if not testing and not to_myself_only:
@@ -611,21 +658,19 @@ def send_mail(testing,
     if len(ready_emails) == 0:
         sys.stderr.write("Nothing to send by email from the last few pages of the results.\n")
         return
-    if macro == WEAK_AVTECH:
-        prodname = "AVTech"
+    if macro in MACRO_PRODUCTS:
+        prodname = MACRO_PRODUCTS[macro]
     elif product:
         prodname = product
     else:
         prodname = extract_thing(shodanquery) or "internet thing"
 
-    if macro == CHECK_COINHIVE:
-        vulnerability = "showing Coinhive"
-    elif macro == WEAK_AVTECH:
-        vulnerability = "exhibiting known exploits or factory-defined authentication"
+    if macro in MACRO_SMELLS:
+        smell = MACRO_SMELLS[macro]
     elif component:
-        vulnerability = "running \"%s\"" % (component,)
+        smell = "running \"%s\"" % (component,)
     else:
-        vulnerability = None
+        smell = None
     for e in sorted(ready_emails.keys()):
         if testing:
             sys.stderr.write("Testing email for %s by sending it just to myself...\n" % (e,))
@@ -634,19 +679,19 @@ def send_mail(testing,
                     " to myself" if to_myself_only else ""))
         ehosts = ready_emails[e]
         msg = MIMEText("""
-Hello %s,
+Hello {email},
 
-Your %s at the following address(es) appeared vulnerable to abuse and botnets%s:
+Your {product} at the following address(es) appeared vulnerable to abuse and botnets{because}:
 
-  %s
+  {logstr}
 
 Best regards,
 
 A community cleanup initiative
 https://github.com/frantic-search/community-cleanup
-""" % (e, prodname,
-    "" if vulnerability is None else "\nbecause of %s" % (vulnerability,),
-    "\n  ".join(str(ehost) for ehost in ehosts)))
+""".format(email=e, product=prodname,
+    because=("" if smell is None else "\nbecause of %s" % (smell,)),
+    logstr="\n  ".join(str(ehost) for ehost in ehosts)))
 
         recipients = [myaddr]
         if not testing and not to_myself_only:
@@ -690,6 +735,7 @@ def recheck(testing, rerun, ips,
     if testing:
         ips = tuple(ip_address(ip) for ip in TEST_IPS)
     logs = []
+    matched_macros = {}
     continue_chunks = True
     for ips_chunk in chunks(ips, IPS_LIMIT):
         ips_chunk_str = ",".join(str(ip) for ip in ips_chunk)
@@ -714,11 +760,14 @@ def recheck(testing, rerun, ips,
             sys.stderr.write("  Found HTTP(S) services: {numhosts}"
                     " (out of {nummatches} matches)\n".format(numhosts=numhosts,
                         nummatches=nummatches))
-            logs.extend(log_hosts(testing, hosts, openers, httpfilters, debuglevel=debuglevel))
+            matched_chunk_macros, matched_chunk_logs = log_hosts(testing, hosts, openers, httpfilters, debuglevel=debuglevel)
+            matched_macros.update(matched_chunk_macros)
+            logs.extend(matched_chunk_logs)
             page += 1
         if not continue_chunks:
             break
-    send_logs_mail(testing, myaddr, to_myself_only, myipaddr, rerun, logs)
+    matched_macros = tuple([m for m in sorted(matched_macros.keys())])
+    send_logs_mail(testing, myaddr, to_myself_only, myipaddr, rerun, matched_macros, logs)
 
 
 def search_and_mail(testing, checkurl,
