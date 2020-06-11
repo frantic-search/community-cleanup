@@ -157,17 +157,18 @@ MACRO_LEGENDS = {
 
         https://www.securityweek.com/remotely-exploitable-vulnerability-discovered-mikrotiks-routeros""",
 
-        WEAK_AVTECH: """Adversaries may discover (or already discovered) a chance to
-    take control of the device due to a weakness in the firmware or leaving
-    the default password unchanged.
+        WEAK_AVTECH: """Adversaries may discover (or already discovered) a
+    chance to take control of the device due to a weakness in the firmware
+    or leaving the default password unchanged.
 
         https://seclists.org/bugtraq/2016/Oct/26
 
         https://www.exploit-db.com/exploits/40500""",
 
-        WEAK_JENKINS: """Jenkins servers left without a password protection allow downloading source
-    code, configuration files and build results. The server software and its
-    plugins may have vulnerabilities of varying severities.
+        WEAK_JENKINS: """Jenkins servers left without a password protection
+    allow downloading source code, configuration files and build results.
+    The server software and its plugins may have vulnerabilities of varying
+    severities.
 
         https://www.jenkins.io/security/advisories/"""
     }
@@ -262,6 +263,9 @@ def resilient_send(req, timeout=URL_TIMEOUT, repeatsleep=REPEAT_SLEEP, debugleve
                 # A backend timed out.  Rinse, repeat.
                 sys.stderr.write("  *** Backend time out\n")
                 pass
+            elif "Request rate limit reached" in backendmsg:
+                sys.stderr.write("  *** Rate limit reached\n")
+                pass
             else:
                 break
         except NETWORK_ERRORS as e:
@@ -342,9 +346,7 @@ def search_shodan(testing, page, **kwargs):
         qlow = queryargvalue.lower()
         for macro in MACROS:
             macrolow = MACRO_PRODUCTS[macro].lower()
-            print(macrolow, qlow)
             if macrolow in qlow:
-                print("OK")
                 return (200, {"matches": MACRO_FIXTURES[macro]})
         if "ip:" in qlow:
             return (200, {
@@ -353,7 +355,7 @@ def search_shodan(testing, page, **kwargs):
             })
         else:
             raise Usage("Only products {products}, as well as IP lookups, are mocked as Shodan results"
-                    .format(products=", ".join(MACRO_PRODUCTS.keys())))
+                    .format(products=", ".join(sorted(MACRO_PRODUCTS.keys()))))
 
     with open(os.path.expanduser("~/.shodan")) as f:
         shodan_key = f.read().strip()
@@ -497,7 +499,7 @@ def check(macro, httpfilter, baseurl, opener, findings=None):
     return False
 
 
-def log_hosts(testing, hosts, openers, httpfilters, debuglevel=0):
+def log_hosts(testing, macro, hosts, openers, httpfilters, debuglevel=0):
     logs = []
     found_macros = {}
     for hostrec in hosts:
@@ -509,18 +511,22 @@ def log_hosts(testing, hosts, openers, httpfilters, debuglevel=0):
 
         product = hostrec.get("product", "").lower()
         guessed = False
-        for macro in MACROS:
-            product_guess = MACRO_PRODUCTS[macro].lower()
-            if (product_guess in product) or (len(product.strip()) == 0):
+        if macro is None:
+            check_macros = MACROS
+        else:
+            check_macros = [macro]
+        for check_macro in check_macros:
+            product_guess = MACRO_PRODUCTS[check_macro].lower()
+            if (macro is not None) or (product_guess in product) or (len(product.strip()) == 0):
                 guessed = True
-                vuln = MACRO_VULNS[macro]
+                vuln = MACRO_VULNS[check_macro]
             else:
                 continue
-            httpfilter = httpfilters[macro]
+            httpfilter = httpfilters[check_macro]
             findings = []
             ts = local_timestamp()
-            if check(macro, httpfilter, url, openers[is_ssl], findings):
-                found_macros[macro] = 1
+            if check(check_macro, httpfilter, url, openers[is_ssl], findings):
+                found_macros[check_macro] = 1
                 if isinstance(host, (IPv4Address, IPv6Address)):
                     ip = host
                 else:
@@ -728,7 +734,7 @@ def chunks(seq, n):
         yield tuple(chunk)
 
 
-def recheck(testing, rerun, ips,
+def recheck(testing, macro, rerun, ips,
         myaddr, myipaddr, to_myself_only,
         openers, httpfilters,
         debuglevel):
@@ -760,7 +766,8 @@ def recheck(testing, rerun, ips,
             sys.stderr.write("  Found HTTP(S) services: {numhosts}"
                     " (out of {nummatches} matches)\n".format(numhosts=numhosts,
                         nummatches=nummatches))
-            matched_chunk_macros, matched_chunk_logs = log_hosts(testing, hosts, openers, httpfilters, debuglevel=debuglevel)
+            matched_chunk_macros, matched_chunk_logs = log_hosts(testing, macro, 
+                    hosts, openers, httpfilters, debuglevel=debuglevel)
             matched_macros.update(matched_chunk_macros)
             logs.extend(matched_chunk_logs)
             page += 1
@@ -911,7 +918,7 @@ def main(argv):
         raise Usage()
 
     if rerun:
-        if shodanquery or product or country or component or macro:
+        if shodanquery or product or country or component:
             raise Usage("The --rerun argument overrides Shodan search")
     else:
         if checkurl:
@@ -947,14 +954,14 @@ def main(argv):
                 sys.stderr.write("My IP: %s\n" % (myip,))
                 myipaddr = ip_address(myip)
                 if rerun in all_emails:
-                    recheck(testing, rerun, all_emails[rerun],
+                    recheck(testing, macro, rerun, all_emails[rerun],
                             myaddr, myipaddr, to_myself_only,
                             openers, httpfilters, debuglevel)
                 else:
                     emailpat = re.compile(rerun)
                     for e in sorted(all_emails.keys()):
                         if emailpat.match(e):
-                            recheck(testing, e, all_emails[e],
+                            recheck(testing, macro, e, all_emails[e],
                                     myaddr, myipaddr, to_myself_only,
                                     openers, httpfilters, debuglevel)
     else:
