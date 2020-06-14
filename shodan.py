@@ -47,6 +47,7 @@ if os.name == "nt":
         del os.environ["TZ"]
 import time
 
+from collections import namedtuple
 from urllib import request, parse
 from urllib.error import HTTPError, URLError
 from http.client import BadStatusLine, CannotSendRequest
@@ -239,12 +240,12 @@ process_http_response = process_http_error
 
 
 def log_network_error(e, url):
-    sys.stderr.write("  *** Network {classname} with {url}\n".format(classname=e.__class__.__name__,
+    sys.stderr.write("  *** Network {classname} in {url}\n".format(classname=e.__class__.__name__,
         url=url))
 
 
 def log_error(e, url):
-    sys.stderr.write("  *** {classname} with {url}\n".format(classname=e.__class__.__name__,
+    sys.stderr.write("  *** {classname} in {url}\n".format(classname=e.__class__.__name__,
         url=url))
 
 
@@ -259,8 +260,13 @@ def resilient_send(req, timeout=URL_TIMEOUT, repeatsleep=REPEAT_SLEEP, debugleve
         handlerclass = request.HTTPSHandler
     else:
         handlerclass = request.HTTPHandler
+    # Verify SSL certificates and host names
     handler = handlerclass(debuglevel=debuglevel)
     opener = request.build_opener(handler)
+    # rdap.org does not like Python agents
+    opener.addheaders = [(header, value)
+                     for header, value in opener.addheaders
+                     if header.lower() != 'user-agent'] 
 
     while True:
         try:
@@ -283,7 +289,29 @@ def resilient_send(req, timeout=URL_TIMEOUT, repeatsleep=REPEAT_SLEEP, debugleve
             log_network_error(e, url)
         sleep_with_banner(repeatsleep)
 
-    return (code, json.loads(body))
+    try:
+        return (code, json.loads(body))
+    except json.decoder.JSONDecodeError as e:
+        # log_error(e, url + " with response " + body)
+        return (code, {"body": body})
+
+
+# https://blog.cloudflare.com/rfc8482-saying-goodbye-to-any/
+def getipaddr(host, port=None):
+    if isinstance(host, (IPv4Address, IPv6Address)):
+        return host
+    # isinstance(host, str)
+    # Convert both 'xx.xx.xx.xx' and 'HOSTNAME' to
+    # ipaddress.IPvXAddress for sorting.
+    for tryfamily in (socket.AddressFamily.AF_INET, socket.AddressFamily.AF_INET6):
+        try:
+            for (fam, typ, proto, cname, sockaddr) in socket.getaddrinfo(host, port, tryfamily, socket.SocketKind.SOCK_STREAM):
+                (addr, port) = sockaddr[:2]
+                return ip_address(addr)
+        except socket.gaierror as e:
+            log_network_error(e, host)
+            continue
+    return host
 
 
 def myip_shodan(testing, **kwargs):
@@ -340,12 +368,27 @@ def search_shodan(testing, page, **kwargs):
             ("country", "country"),
             ("ip", "ip"),
         )
+    def shodan_jenkins_fixup(kw):
+        if kw.get("component") == "jenkins":
+            del kw["component"]
+            q = kw.get("query")
+            if q is None:
+                q = "x-jenkins"
+            else:
+                q = "%s %s" % (q, "x-jenkins")
+            kw["query"] = q
+
+    shodan_fixups = (shodan_jenkins_fixup,)
+    # Avoid changing the caller's dictionary
+    kw = dict(kwargs)
+    for shodan_fixup in shodan_fixups:
+        shodan_fixup(kw)
     querypieces = []
-    query = kwargs.get("query")
+    query = kw.get("query")
     if query is not None:
         querypieces.append(query)
     for (funcarg, shodanarg) in argsmap:
-        funcval = kwargs.get(funcarg)
+        funcval = kw.get(funcarg)
         if funcval is not None:
             querypieces.append("{key}:{value}".format(key=shodanarg, value=funcval))
     queryargvalue = " ".join(querypieces)
@@ -378,9 +421,9 @@ def search_shodan(testing, page, **kwargs):
                         ("page", page),
                     ))),
                     method="GET"),
-                timeout=kwargs.get("timeout", SHODAN_TIMEOUT),
-                repeatsleep=kwargs.get("repeatsleep", REPEAT_SLEEP),
-                debuglevel=kwargs.get("debuglevel", 0))
+                timeout=kw.get("timeout", SHODAN_TIMEOUT),
+                repeatsleep=kw.get("repeatsleep", REPEAT_SLEEP),
+                debuglevel=kw.get("debuglevel", 0))
 
 
 
@@ -407,14 +450,15 @@ IPV6ADDR = '|'.join(['(?:{})'.format(g) for g in IPV6GROUPS[::-1]])  # Reverse r
 IPV4ADDR_COMPILED = re.compile(IPV4ADDR)
 IPV6ADDR_COMPILED = re.compile(IPV6ADDR)
 
-RDAP_BOOTSTRAP = "https://rdap.arin.net/bootstrap"
+RDAP_BOOTSTRAP = "https://rdap.org"
 
 def whoseip(ip, whoserole, debuglevel=0):
     r"""
     Obtain email addresses of a given role for the given IP address.
 
-    >>> whoseip('71.17.138.152', 'abuse')
-    ['sasktel.wanec@sasktel.com']
+    >>> print('#'); whoseip('71.17.138.152', 'abuse', debuglevel)
+    #
+    ...['sasktel.wanec@sasktel.com']
 
     >>> whoseip('109.87.56.48', 'abuse')
     ['abuse@triolan.com.ua']
@@ -430,6 +474,15 @@ def whoseip(ip, whoserole, debuglevel=0):
 
     >>> whoseip('build.automotivelinux.org', 'abuse')
     ['abuse@enom.com']
+
+    >>> whoseip('104.31.68.51', 'abuse')
+    ['abuse@cloudflare.com']
+
+    >>> whoseip('68.183.197.228', 'abuse')
+    ['abuse@digitalocean.com']
+
+    >>> whoseip('ci.jwfh.ca', 'abuse')
+    []
     """
 
     def get_roles_addresses(entities):
@@ -462,7 +515,8 @@ def whoseip(ip, whoserole, debuglevel=0):
     try:
         entroles = get_roles_addresses(whoseobj["entities"])
     except (KeyError, IndexError) as e:
-        sys.stderr.write("  *** %s %s in %s\n" % (e.__class__.__name__,
+        sys.stderr.write("  *** whoseip(%r, %r) %s %s in %s\n" % (ip, whoserole,
+                e.__class__.__name__,
                 e, pformat(whoseobj)))
         return []
     roleemails = {}
@@ -472,11 +526,18 @@ def whoseip(ip, whoserole, debuglevel=0):
                 if "Unvalidated" in remark["title"]:
                     break
             else:
+                email = addr["email"]
+                if "@" not in email:
+                    # Empty or "EMAIL REDACTED FOR PRIVACY"
+                    # sys.stderr.write("  *** whoseip(%r, %r) got an invalid email %r in roles %r\n" % (ip, whoserole,
+                    #     email, roles))
+                    continue
                 for role in roles:
                     if role in roleemails:
-                        roleemails[role].append(addr["email"])
+                        if email not in roleemails[role]:
+                            roleemails[role].append(email)
                     else:
-                        roleemails[role] = [addr["email"]]
+                        roleemails[role] = [email]
     for tryrole in (whoserole, "technical", "administrative"):
         if tryrole in roleemails:
             return roleemails[tryrole]
@@ -512,12 +573,10 @@ def write_sent_emails(testing, to_myself_only, sent_name, sent_emails):
             f.write("%s: %s\n" % (e, ", ".join(str(ehost) for ehost in ehosts)))
 
 
-class HTTPChecker:
-    def __init__(self, path, headers, bodysearch, host_hint_extractor=None):
-        self.path = path
-        self.headers = headers
-        self.bodysearch = bodysearch
-        self.host_hint_extractor = host_hint_extractor
+class HTTPChecker(namedtuple("HTTPChecker", 
+        ("path", "headers", "bodysearch", "host_hint_extractor"),
+        defaults=(None,))):
+    pass
 
 
 def jenkins_host_extractor(json):
@@ -596,16 +655,13 @@ def check(macro, httpchecker, baseurl, opener, findings=None, host_hints=None):
     return False
 
 
-class HostLog:
-    def __init__(self, ip, ts, vuln, findings):
-        self.ip = ip
-        self.ts = ts
-        self.vuln = vuln
-        self.findings = findings
-
+# https://stackoverflow.com/questions/390250/elegant-ways-to-support-equivalence-equality-in-python-classes
+class HostLog(namedtuple("HostLog", ("ip", "ts", "vuln", "findings"))):
+    # https://docs.python.org/3/library/collections.html#collections.namedtuple
+    __slots__ = ()
     def __str__(self):
         return "{ip!s:>15} {ts} {vuln:<17} {finds}".format(finds = ", ".join(self.findings),
-                **vars(self))
+                **self._asdict())
 
 
 def log_hosts(testing, macro, hosts, openers, httpcheckers, debuglevel=0):
@@ -636,14 +692,7 @@ def log_hosts(testing, macro, hosts, openers, httpcheckers, debuglevel=0):
             ts = local_timestamp()
             if check(check_macro, httpchecker, url, openers[is_ssl], findings):
                 found_macros[check_macro] = 1
-                if isinstance(host, (IPv4Address, IPv6Address)):
-                    ip = host
-                else:
-                    # isinstance(host, str)
-                    # Convert both 'xx.xx.xx.xx' and 'HOSTNAME' to
-                    # ipaddress.IPvXAddress for soring.
-                    ipstr = socket.gethostbyname(str(host))
-                    ip = ip_address(ipstr)
+                ip = getipaddr(host, port)
                 # Not looking up owners of the host name "host" here as this
                 # method "log_hosts" is only used to "recheck" IP addresses
                 # already nested by their owner email addresses.
@@ -673,15 +722,8 @@ def record_hosts(testing, hosts, macro, openers, httpchecker, ready_emaillogs, a
             found_emails = False
             for rephost in hosts_to_report:
                 lookup_name = str(rephost)
-                if isinstance(rephost, (IPv4Address, IPv6Address)):
-                    ip = rephost
-                else:
-                    # isinstance(rephost, str)
-                    # Convert both 'xx.xx.xx.xx' and 'HOSTNAME' to
-                    # ipaddress.IPvXAddress for soring.
-                    ipstr = socket.gethostbyname(lookup_name)
-                    ip = ip_address(ipstr)
-                for e in whoseip(lookup_name, "abuse"):
+                ip = getipaddr(rephost, port)
+                for e in whoseip(lookup_name, "abuse", debuglevel):
                     found_emails = True
                     sys.stderr.write("  %s\n" % (e,))
                     page_ehosts = page_emails.get(e, [])
@@ -1033,7 +1075,9 @@ def main(argv):
 
     if unittesting:
         import doctest
-        (failures, tests) = doctest.testmod(verbose=(not not debuglevel))
+        (failures, tests) = doctest.testmod(verbose=(not not debuglevel),
+                extraglobs=(('debuglevel', debuglevel),),
+                optionflags=doctest.ELLIPSIS)
         raise SystemExit(0 if failures == 0 else 1 + (failures % 127))
 
     if not (rerun or shodanquery or product or country or component or macro):
