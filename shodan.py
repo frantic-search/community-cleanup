@@ -50,6 +50,7 @@ import time
 from urllib import request, parse
 from urllib.error import HTTPError, URLError
 from http.client import BadStatusLine, CannotSendRequest
+from http import HTTPStatus
 import ssl
 import json
 import base64
@@ -172,6 +173,11 @@ MACRO_LEGENDS = {
 
         https://www.jenkins.io/security/advisories/"""
     }
+RESERVATION = """None of these findings imply that the owners of the devices or machines
+    were responsible for malicious activities.  Instead, they became or may
+    become victims of remote attacks.  Once successful, the attackers take
+    control of the device and use it for other activities."""
+
 
 SHODAN_TIMEOUT = 15
 SHODAN_LARGE_TIMEOUT = 45
@@ -223,7 +229,7 @@ def process_http_error(e, quiet=False):
                 code=e.getcode(), classname=e2.__class__.__name__))
         code = 0
     else:
-        if ((code < 200) or (code >= 400)) and not quiet:
+        if ((code < HTTPStatus.OK) or (code >= HTTPStatus.BAD_REQUEST)) and not quiet:
             sys.stderr.write("  *** HTTP response to {url}: code {code}, body {body!r}...\n".format(url=e.geturl(),
                     code=e.getcode(), body=body[:20]))
     return (code, body)
@@ -234,6 +240,11 @@ process_http_response = process_http_error
 
 def log_network_error(e, url):
     sys.stderr.write("  *** Network {classname} with {url}\n".format(classname=e.__class__.__name__,
+        url=url))
+
+
+def log_error(e, url):
+    sys.stderr.write("  *** {classname} with {url}\n".format(classname=e.__class__.__name__,
         url=url))
 
 
@@ -279,7 +290,7 @@ def myip_shodan(testing, **kwargs):
     url = "https://api.shodan.io/tools/myip"
     sys.stderr.write("Inquiring shodan.io on my IP address...\n")
     if testing:
-        return (200, "45.56.111.4")
+        return (HTTPStatus.OK, "45.56.111.4")
 
     with open(os.path.expanduser("~/.shodan")) as f:
         shodan_key = f.read().strip()
@@ -297,7 +308,7 @@ def info_shodan(testing, **kwargs):
     url = "https://api.shodan.io/api-info"
     sys.stderr.write("Inquiring shodan.io on API usage limits...\n")
     if testing:
-        return (200, {"https": False,
+        return (HTTPStatus.OK, {"https": False,
              "monitored_ips": 8586,
              "plan": "dev",
              "query_credits": 10,
@@ -342,14 +353,14 @@ def search_shodan(testing, page, **kwargs):
 
     if testing:
         if page > 1:
-            return (200, {"matches": []})
+            return (HTTPStatus.OK, {"matches": []})
         qlow = queryargvalue.lower()
         for macro in MACROS:
             macrolow = MACRO_PRODUCTS[macro].lower()
             if macrolow in qlow:
-                return (200, {"matches": MACRO_FIXTURES[macro]})
+                return (HTTPStatus.OK, {"matches": MACRO_FIXTURES[macro]})
         if "ip:" in qlow:
-            return (200, {
+            return (HTTPStatus.OK, {
               "matches": IP_SEARCH_FIXTURES,
               "total": len(IP_SEARCH_FIXTURES)
             })
@@ -372,12 +383,38 @@ def search_shodan(testing, page, **kwargs):
                 debuglevel=kwargs.get("debuglevel", 0))
 
 
+
+# https://gist.github.com/dfee/6ed3a4b05cfe7a6faf40a2102408d5d8
+IPV4SEG  = r'(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])'
+IPV4ADDR = r'(?:(?:' + IPV4SEG + r'\.){3,3}' + IPV4SEG + r')'
+IPV6SEG  = r'(?:(?:[0-9a-fA-F]){1,4})'
+IPV6GROUPS = (
+    r'(?:' + IPV6SEG + r':){7,7}' + IPV6SEG,                  # 1:2:3:4:5:6:7:8
+    r'(?:' + IPV6SEG + r':){1,7}:',                           # 1::                                 1:2:3:4:5:6:7::
+    r'(?:' + IPV6SEG + r':){1,6}:' + IPV6SEG,                 # 1::8               1:2:3:4:5:6::8   1:2:3:4:5:6::8
+    r'(?:' + IPV6SEG + r':){1,5}(?::' + IPV6SEG + r'){1,2}',  # 1::7:8             1:2:3:4:5::7:8   1:2:3:4:5::8
+    r'(?:' + IPV6SEG + r':){1,4}(?::' + IPV6SEG + r'){1,3}',  # 1::6:7:8           1:2:3:4::6:7:8   1:2:3:4::8
+    r'(?:' + IPV6SEG + r':){1,3}(?::' + IPV6SEG + r'){1,4}',  # 1::5:6:7:8         1:2:3::5:6:7:8   1:2:3::8
+    r'(?:' + IPV6SEG + r':){1,2}(?::' + IPV6SEG + r'){1,5}',  # 1::4:5:6:7:8       1:2::4:5:6:7:8   1:2::8
+    IPV6SEG + r':(?:(?::' + IPV6SEG + r'){1,6})',             # 1::3:4:5:6:7:8     1::3:4:5:6:7:8   1::8
+    r':(?:(?::' + IPV6SEG + r'){1,7}|:)',                     # ::2:3:4:5:6:7:8    ::2:3:4:5:6:7:8  ::8       ::
+    r'fe80:(?::' + IPV6SEG + r'){0,4}%[0-9a-zA-Z]{1,}',       # fe80::7:8%eth0     fe80::7:8%1  (link-local IPv6 addresses with zone index)
+    r'::(?:ffff(?::0{1,4}){0,1}:){0,1}[^\s:]' + IPV4ADDR,     # ::255.255.255.255  ::ffff:255.255.255.255  ::ffff:0:255.255.255.255 (IPv4-mapped IPv6 addresses and IPv4-translated addresses)
+    r'(?:' + IPV6SEG + r':){1,4}:[^\s:]' + IPV4ADDR,          # 2001:db8:3:4::192.0.2.33  64:ff9b::192.0.2.33 (IPv4-Embedded IPv6 Address)
+)
+IPV6ADDR = '|'.join(['(?:{})'.format(g) for g in IPV6GROUPS[::-1]])  # Reverse rows for greedy match
+
+IPV4ADDR_COMPILED = re.compile(IPV4ADDR)
+IPV6ADDR_COMPILED = re.compile(IPV6ADDR)
+
+RDAP_BOOTSTRAP = "https://rdap.arin.net/bootstrap"
+
 def whoseip(ip, whoserole, debuglevel=0):
     r"""
     Obtain email addresses of a given role for the given IP address.
 
     >>> whoseip('71.17.138.152', 'abuse')
-    ['abuse@sasktel.net']
+    ['sasktel.wanec@sasktel.com']
 
     >>> whoseip('109.87.56.48', 'abuse')
     ['abuse@triolan.com.ua']
@@ -386,11 +423,17 @@ def whoseip(ip, whoserole, debuglevel=0):
     ['abuse@sympatico.ca', 'abuse@bell.ca']
 
     >>> whoseip('24.84.44.189', 'abuse')
-    ['internet.abuse@sjrb.ca']
+    ['ipadmin@sjrb.ca']
+
+    >>> whoseip('199.19.213.77', 'abuse')
+    ['mnaser@vexxhost.com']
+
+    >>> whoseip('build.automotivelinux.org', 'abuse')
+    ['abuse@enom.com']
     """
 
     def get_roles_addresses(entities):
-        er = [(e.get("roles", []),
+        er = [(e.get("roles", []), e.get("remarks", []),
                 dict([(k, v) for (k, obj, kind, v) in e.get("vcardArray", [None, []])[1]]))
             for e in entities]
         for e in entities:
@@ -398,21 +441,46 @@ def whoseip(ip, whoserole, debuglevel=0):
                 er.extend(get_roles_addresses(e["entities"]))
         return er
 
-    emails = []
-    url = "https://rdap.arin.net/bootstrap/ip/%s" % (ip,)
-    (code, whoseobj) = resilient_send(request.Request(url), debuglevel=debuglevel)
+    if IPV4ADDR_COMPILED.match(ip) or IPV6ADDR_COMPILED.match(ip):     
+        url = "%s/ip/%s" % (RDAP_BOOTSTRAP, ip,)
+        (code, whoseobj) = resilient_send(request.Request(url), debuglevel=debuglevel)
+        if code != HTTPStatus.OK:
+            return []
+    else:
+        splits = ip.split(".")
+        while True:
+            if len(splits) < 2:
+                return []
+            domain = ".".join(splits)
+            url = "%s/domain/%s" % (RDAP_BOOTSTRAP, domain,)
+            (code, whoseobj) = resilient_send(request.Request(url), debuglevel=debuglevel)
+            if code != HTTPStatus.OK:
+                del splits[0]
+            else:
+                break
 
     try:
         entroles = get_roles_addresses(whoseobj["entities"])
     except (KeyError, IndexError) as e:
         sys.stderr.write("  *** %s %s in %s\n" % (e.__class__.__name__,
-                e, pformat(r)))
-        return emails
-    for roles, addr in entroles:
-        if whoserole in roles:
-            if "email" in addr:
-                emails.append(addr["email"])
-    return emails
+                e, pformat(whoseobj)))
+        return []
+    roleemails = {}
+    for roles, remarks, addr in entroles:
+        if "email" in addr:
+            for remark in remarks:
+                if "Unvalidated" in remark["title"]:
+                    break
+            else:
+                for role in roles:
+                    if role in roleemails:
+                        roleemails[role].append(addr["email"])
+                    else:
+                        roleemails[role] = [addr["email"]]
+    for tryrole in (whoserole, "technical", "administrative"):
+        if tryrole in roleemails:
+            return roleemails[tryrole]
+    return []
 
 
 def read_sent_emails(sent_name):
@@ -444,38 +512,57 @@ def write_sent_emails(testing, to_myself_only, sent_name, sent_emails):
             f.write("%s: %s\n" % (e, ", ".join(str(ehost) for ehost in ehosts)))
 
 
-def build_httpfilter(macro):
-    httpfilter = []
+class HTTPChecker:
+    def __init__(self, path, headers, bodysearch, host_hint_extractor=None):
+        self.path = path
+        self.headers = headers
+        self.bodysearch = bodysearch
+        self.host_hint_extractor = host_hint_extractor
+
+
+def jenkins_host_extractor(json):
+    if "primaryView" in json:
+        p = json["primaryView"]
+        if "url" in p:
+            u = p["url"]
+            urlobj = parse.urlparse(u)
+            return urlobj.hostname
+    return None
+
+
+def build_httpchecker(macro):
+    httpchecker = []
     if macro is None:
         pass
     elif macro == CHECK_COINHIVE:
-        httpfilter.append(("/", (), "coinhive"))
+        httpchecker.append(HTTPChecker(path="/", headers=(), bodysearch="coinhive"))
     elif macro == WEAK_AVTECH:
         avtech_path = "/cgi-bin/nobody/Machine.cgi?action=get_capability"
         avtech_headers = ((b"Authorization", b"Basic %s" % (base64.b64encode(b"admin:admin"),)),)
         avtech_bodysearch = "Firmware.Version"
-        httpfilter.append((avtech_path, (), avtech_bodysearch))
-        httpfilter.append((avtech_path, avtech_headers, avtech_bodysearch))
+        httpchecker.append(HTTPChecker(path=avtech_path, headers=(), bodysearch=avtech_bodysearch))
+        httpchecker.append(HTTPChecker(path=avtech_path, headers=avtech_headers, bodysearch=avtech_bodysearch))
     elif macro == WEAK_JENKINS:
         jenkins_path = "/api/json"
         jenkins_bodysearch = "\"jobs\""
-        httpfilter.append((jenkins_path, (), jenkins_bodysearch))
+        httpchecker.append(HTTPChecker(path=jenkins_path, headers=(), bodysearch=jenkins_bodysearch,
+            host_hint_extractor=jenkins_host_extractor))
     else:
         raise Usage("Unknown macro \"%s\"" % (macro,))
-    return httpfilter
+    return httpchecker
 
 
-def check(macro, httpfilter, baseurl, opener, findings=None):
-    if len(httpfilter) == 0:
+def check(macro, httpchecker, baseurl, opener, findings=None, host_hints=None):
+    if len(httpchecker) == 0:
         # Assume the host vulnerable in the absence of HTTP checks
         return True
 
-    for (path_info, headers, bodysearch) in httpfilter:
+    for checker in httpchecker:
         body = ""
-        url = baseurl + path_info
+        url = baseurl + checker.path
         try:
             req = request.Request(url)
-            for (name, value) in headers:
+            for (name, value) in checker.headers:
                 req.add_header(name, value)
             with opener.open(req, timeout=URL_TIMEOUT) as response:
                 (code, body) = process_http_response(response, True)
@@ -485,21 +572,43 @@ def check(macro, httpfilter, baseurl, opener, findings=None):
             log_network_error(e, url)
             return False
 
-        if bodysearch.lower() in body.lower():
-            finding = "Got {bodysearch!r} in {url}{headersinfo}".format(bodysearch=bodysearch,
+        if checker.bodysearch.lower() in body.lower():
+            finding = "Got {bodysearch!r} in {url}{headersinfo}".format(bodysearch=checker.bodysearch,
                 url=url,
-                headersinfo=(" with default %s" % (headers[0][0].decode("ascii"),) if len(headers) > 0 else ""))
-            if findings is None:
-                sys.stderr.write("  %s\n" % (finding,))
-            else:
+                headersinfo=(" with default %s" % (checker.headers[0][0].decode("ascii"),)
+                    if len(checker.headers) > 0 else ""))
+            if findings is not None:
                 findings.append(finding)
+            if ((host_hints is not None) and (len(host_hints) == 0) and
+                    (checker.host_hint_extractor is not None)):
+                try:
+                    body_json = json.loads(body)
+                except json.decoder.JSONDecodeError as e:
+                    body_json = {}
+                    log_error(e, url)
+                host_hint = checker.host_hint_extractor(body_json)
+                if host_hint is not None:
+                    host_hints.append(host_hint)
+            sys.stderr.write("  %s\n" % (finding,))
             return True
 
     sys.stderr.write("  *** The product appears protected against %s at %s\n" % (macro, baseurl,))
     return False
 
 
-def log_hosts(testing, macro, hosts, openers, httpfilters, debuglevel=0):
+class HostLog:
+    def __init__(self, ip, ts, vuln, findings):
+        self.ip = ip
+        self.ts = ts
+        self.vuln = vuln
+        self.findings = findings
+
+    def __str__(self):
+        return "{ip!s:>15} {ts} {vuln:<17} {finds}".format(finds = ", ".join(self.findings),
+                **vars(self))
+
+
+def log_hosts(testing, macro, hosts, openers, httpcheckers, debuglevel=0):
     logs = []
     found_macros = {}
     for hostrec in hosts:
@@ -522,10 +631,10 @@ def log_hosts(testing, macro, hosts, openers, httpfilters, debuglevel=0):
                 vuln = MACRO_VULNS[check_macro]
             else:
                 continue
-            httpfilter = httpfilters[check_macro]
+            httpchecker = httpcheckers[check_macro]
             findings = []
             ts = local_timestamp()
-            if check(check_macro, httpfilter, url, openers[is_ssl], findings):
+            if check(check_macro, httpchecker, url, openers[is_ssl], findings):
                 found_macros[check_macro] = 1
                 if isinstance(host, (IPv4Address, IPv6Address)):
                     ip = host
@@ -535,51 +644,59 @@ def log_hosts(testing, macro, hosts, openers, httpfilters, debuglevel=0):
                     # ipaddress.IPvXAddress for soring.
                     ipstr = socket.gethostbyname(str(host))
                     ip = ip_address(ipstr)
-                logrec = "{ip!s:>15} {ts} {vuln:<17} {finds}".format(ip=ip,
-                        ts=ts,
-                        vuln=vuln,
-                        finds=", ".join(findings))
-                logs.append((ip, logrec))
-                sys.stderr.write("    %s\n" % (logrec,))
+                # Not looking up owners of the host name "host" here as this
+                # method "log_hosts" is only used to "recheck" IP addresses
+                # already nested by their owner email addresses.
+                hostlog = HostLog(ip, ts, vuln, findings)
+                logs.append(hostlog)
+                sys.stderr.write("    %s\n" % (hostlog,))
         if not guessed:
             sys.stderr.write("    %s\n" % ("No product" if product is None
                 else "Unexpected product %s" % (product,)))
     return found_macros, logs
 
 
-def record_hosts(testing, hosts, macro, openers, httpfilter, ready_emails, all_emails, debuglevel=0):
+def record_hosts(testing, hosts, macro, openers, httpchecker, ready_emaillogs, all_emails, debuglevel=0):
     page_emails = {}
 
     for (host, port, is_ssl) in hosts:
         sys.stderr.write("%s\n" % (host,))
-        url = "http%s://%s:%s" % ("s" if is_ssl else "", host, port)
+        url = "http%s://%s%s" % ("s" if is_ssl else "", host, "" if port is None else (":%s" % (port,)))
+        findings = []
+        host_hints = []
+        ts = local_timestamp()
 
-        if check(macro, httpfilter, url, openers[is_ssl]):
+        if check(macro, httpchecker, url, openers[is_ssl], findings, host_hints):
+            hosts_to_report = [host]
+            if len(host_hints) > 0:
+                hosts_to_report.append(host_hints[0])
             found_emails = False
-            if isinstance(host, (IPv4Address, IPv6Address)):
-                ip = host
-            else:
-                # isinstance(host, str)
-                # Convert both 'xx.xx.xx.xx' and 'HOSTNAME' to
-                # ipaddress.IPvXAddress for soring.
-                ipstr = socket.gethostbyname(str(host))
-                ip = ip_address(ipstr)
-            for e in whoseip(ip, "abuse"):
-                found_emails = True
-                sys.stderr.write("  %s\n" % (e,))
-                page_ehosts = page_emails.get(e, [])
-                ready_ehosts = ready_emails.get(e, [])
-                all_ehosts = all_emails.get(e, [])
-                if ip not in all_ehosts:
-                    page_ehosts.append(ip)
-                    ready_ehosts.append(ip)
-                    all_ehosts.append(ip)
-                    page_emails[e] = page_ehosts
-                    ready_emails[e] = ready_ehosts
-                    all_emails[e] = all_ehosts
+            for rephost in hosts_to_report:
+                lookup_name = str(rephost)
+                if isinstance(rephost, (IPv4Address, IPv6Address)):
+                    ip = rephost
+                else:
+                    # isinstance(rephost, str)
+                    # Convert both 'xx.xx.xx.xx' and 'HOSTNAME' to
+                    # ipaddress.IPvXAddress for soring.
+                    ipstr = socket.gethostbyname(lookup_name)
+                    ip = ip_address(ipstr)
+                for e in whoseip(lookup_name, "abuse"):
+                    found_emails = True
+                    sys.stderr.write("  %s\n" % (e,))
+                    page_ehosts = page_emails.get(e, [])
+                    ready_ehostlogs = ready_emaillogs.get(e, [])
+                    all_ehosts = all_emails.get(e, [])
+                    if ip not in all_ehosts:
+                        page_ehosts.append(ip)
+                        ready_ehostlogs.append(HostLog(ip, ts, MACRO_VULNS[macro], findings))
+                        all_ehosts.append(ip)
+                        page_emails[e] = page_ehosts
+                        ready_emaillogs[e] = ready_ehostlogs
+                        all_emails[e] = all_ehosts
 
             if not found_emails:
-                sys.stderr.write("  *** No abuse notification emails found\n")
+                sys.stderr.write("  *** No abuse notification emails found for %s\n" % (host,))
 
     sys.stderr.write("\n")
     for e in sorted(page_emails.keys()):
@@ -587,9 +704,9 @@ def record_hosts(testing, hosts, macro, openers, httpfilter, ready_emails, all_e
         page_ehosts.sort()
         sys.stderr.write("%s: %s\n" % (e, ", ".join(str(page_ehost) for page_ehost in page_ehosts)))
 
-    for e in sorted(ready_emails.keys()):
-        ready_ehosts = ready_emails[e]
-        ready_ehosts.sort()
+    for e in sorted(ready_emaillogs.keys()):
+        ready_ehostlogs = ready_emaillogs[e]
+        ready_ehostlogs.sort()
 
     for e in sorted(all_emails.keys()):
         all_ehosts = all_emails[e]
@@ -633,10 +750,7 @@ Legend:
     {legend}
 
 Reservation:
-    None of these findings imply that the owners of the devices or machines
-    were responsible for malicious activities.  Instead, they became or may
-    become victims of remote attacks.  Once successful, the attackers take
-    control of the device and use it for other activities.
+    {reservation}
 
 Best regards,
 
@@ -644,8 +758,9 @@ A community cleanup initiative
 https://github.com/frantic-search/community-cleanup
 """.format(rerun=rerun,
     myipaddr=myipaddr,
-    logstr="\n  ".join(logrec for (ip, logrec) in sorted(logs)),
-    legend="\n\n".join(("%s: %s" % (MACRO_VULNS[m], MACRO_LEGENDS[m])) for m in matched_macros)))
+    logstr="\n  ".join(str(hostlog) for hostlog in sorted(logs)),
+    legend="\n\n".join(("%s: %s" % (MACRO_VULNS[m], MACRO_LEGENDS[m])) for m in matched_macros),
+    reservation=RESERVATION))
 
     recipients = [myaddr]
     if not testing and not to_myself_only:
@@ -659,9 +774,9 @@ https://github.com/frantic-search/community-cleanup
 
 
 def send_mail(testing,
-        ready_emails, myaddr, to_myself_only,
+        ready_emaillogs, myaddr, to_myself_only,
         shodanquery, product, component, macro):
-    if len(ready_emails) == 0:
+    if len(ready_emaillogs) == 0:
         sys.stderr.write("Nothing to send by email from the last few pages of the results.\n")
         return
     if macro in MACRO_PRODUCTS:
@@ -677,19 +792,22 @@ def send_mail(testing,
         smell = "running \"%s\"" % (component,)
     else:
         smell = None
-    for e in sorted(ready_emails.keys()):
+    for e in sorted(ready_emaillogs.keys()):
         if testing:
             sys.stderr.write("Testing email for %s by sending it just to myself...\n" % (e,))
         else:
             sys.stderr.write("Sending an email for %s%s...\n" % (e,
                     " to myself" if to_myself_only else ""))
-        ehosts = ready_emails[e]
+        ehostlogs = ready_emaillogs[e]
         msg = MIMEText("""
 Hello {email},
 
 Your {product} at the following address(es) appeared vulnerable to abuse and botnets{because}:
 
-  {logstr}
+    {logstr}
+
+{legendpiece}Reservation:
+    {reservation}
 
 Best regards,
 
@@ -697,7 +815,9 @@ A community cleanup initiative
 https://github.com/frantic-search/community-cleanup
 """.format(email=e, product=prodname,
     because=("" if smell is None else "\nbecause of %s" % (smell,)),
-    logstr="\n  ".join(str(ehost) for ehost in ehosts)))
+    logstr="\n    ".join(str(ehostlog) for ehostlog in ehostlogs),
+    legendpiece=("Legend:\n    %s\n\n" % (MACRO_LEGENDS[macro],) if macro in MACRO_LEGENDS else ""),
+    reservation=RESERVATION))
 
         recipients = [myaddr]
         if not testing and not to_myself_only:
@@ -736,7 +856,7 @@ def chunks(seq, n):
 
 def recheck(testing, macro, rerun, ips,
         myaddr, myipaddr, to_myself_only,
-        openers, httpfilters,
+        openers, httpcheckers,
         debuglevel):
     if testing:
         ips = tuple(ip_address(ip) for ip in TEST_IPS)
@@ -751,7 +871,7 @@ def recheck(testing, macro, rerun, ips,
                     ip=ips_chunk_str,
                     debuglevel=debuglevel,
                     timeout=SHODAN_LARGE_TIMEOUT)
-            if shodan_code != 200:
+            if shodan_code != HTTPStatus.OK:
                 sys.stderr.write("Unexpected Shodan code %d, response:\n%s\n" % (shodan_code, pformat(shodan_results),))
                 continue_chunks = False
                 break
@@ -767,7 +887,7 @@ def recheck(testing, macro, rerun, ips,
                     " (out of {nummatches} matches)\n".format(numhosts=numhosts,
                         nummatches=nummatches))
             matched_chunk_macros, matched_chunk_logs = log_hosts(testing, macro, 
-                    hosts, openers, httpfilters, debuglevel=debuglevel)
+                    hosts, openers, httpcheckers, debuglevel=debuglevel)
             matched_macros.update(matched_chunk_macros)
             logs.extend(matched_chunk_logs)
             page += 1
@@ -780,23 +900,23 @@ def recheck(testing, macro, rerun, ips,
 def search_and_mail(testing, checkurl,
         shodanquery, product, country, component, macro, 
         all_emails, sent_name, myaddr, to_myself_only,
-        httpfilter, openers, 
+        httpchecker, openers, 
         debuglevel):
-    ready_emails = {}
+    ready_emaillogs = {}
     if checkurl is None:
         page = 1
         page_sender_count = 0
         while True:
             (shodan_code, shodan_limits) = info_shodan(testing, debuglevel=debuglevel)
             sys.stderr.write("Shodan code %d, limits:\n%s\n" % (shodan_code, pformat(shodan_limits),))
-            if shodan_code != 200:
+            if shodan_code != HTTPStatus.OK:
                 break
 
             (shodan_code, shodan_results) = search_shodan(testing, page,
                     query=shodanquery,
                     product=product, country=country, component=component,
                     debuglevel=debuglevel)
-            if shodan_code != 200:
+            if shodan_code != HTTPStatus.OK:
                 sys.stderr.write("Unexpected Shodan code %d, response:\n%s\n" % (shodan_code, pformat(shodan_results),))
                 break
 
@@ -814,14 +934,14 @@ def search_and_mail(testing, checkurl,
                     " (out of {nummatches} matches)\n".format(numhosts=numhosts,
                         nummatches=nummatches))
 
-            record_hosts(testing, hosts, macro, openers, httpfilter, ready_emails, all_emails, debuglevel=debuglevel)
+            record_hosts(testing, hosts, macro, openers, httpchecker, ready_emaillogs, all_emails, debuglevel=debuglevel)
             page += 1
             page_sender_count += 1
             if page_sender_count == SEND_PAGES:
-                send_mail(testing, ready_emails, myaddr, to_myself_only,
+                send_mail(testing, ready_emaillogs, myaddr, to_myself_only,
                         shodanquery, product, component, macro)
                 write_sent_emails(testing, to_myself_only, sent_name, all_emails)
-                ready_emails = {}
+                ready_emaillogs = {}
                 page_sender_count = 0
     else:
         urlobj = parse.urlparse(checkurl)
@@ -829,10 +949,10 @@ def search_and_mail(testing, checkurl,
                 ((urlobj.hostname, urlobj.port, urlobj.scheme == "https"),),
                 macro,
                 openers,
-                httpfilter,
-                ready_emails, all_emails, debuglevel=debuglevel)
+                httpchecker,
+                ready_emaillogs, all_emails, debuglevel=debuglevel)
 
-    send_mail(testing, ready_emails, myaddr, to_myself_only,
+    send_mail(testing, ready_emaillogs, myaddr, to_myself_only,
             shodanquery, product, component, macro)
     write_sent_emails(testing, to_myself_only, sent_name, all_emails)
 
@@ -932,10 +1052,10 @@ def main(argv):
     sent_name = "email-hosts.txt"
     all_emails = read_sent_emails(sent_name)
 
-    httpfilters = {}
+    httpcheckers = {}
     for m in (None,) + MACROS:
-        httpfilters[m] = build_httpfilter(m)
-    httpfilter = httpfilters[macro]
+        httpcheckers[m] = build_httpchecker(m)
+    httpchecker = httpcheckers[macro]
 
     openers = {}
     for is_ssl in (False, True):
@@ -948,27 +1068,27 @@ def main(argv):
     if rerun:
         (shodan_code, shodan_limits) = info_shodan(testing, debuglevel=debuglevel)
         sys.stderr.write("Shodan code %d, limits:\n%s\n" % (shodan_code, pformat(shodan_limits),))
-        if shodan_code == 200:
+        if shodan_code == HTTPStatus.OK:
             (shodan_code, myip) = myip_shodan(testing, debuglevel=debuglevel)
-            if shodan_code == 200:
+            if shodan_code == HTTPStatus.OK:
                 sys.stderr.write("My IP: %s\n" % (myip,))
                 myipaddr = ip_address(myip)
                 if rerun in all_emails:
                     recheck(testing, macro, rerun, all_emails[rerun],
                             myaddr, myipaddr, to_myself_only,
-                            openers, httpfilters, debuglevel)
+                            openers, httpcheckers, debuglevel)
                 else:
                     emailpat = re.compile(rerun)
                     for e in sorted(all_emails.keys()):
                         if emailpat.match(e):
                             recheck(testing, macro, e, all_emails[e],
                                     myaddr, myipaddr, to_myself_only,
-                                    openers, httpfilters, debuglevel)
+                                    openers, httpcheckers, debuglevel)
     else:
         search_and_mail(testing, checkurl,
                 shodanquery, product, country, component, macro, 
                 all_emails, sent_name, myaddr, to_myself_only,
-                httpfilter, openers,
+                httpchecker, openers,
                 debuglevel)
 
 
