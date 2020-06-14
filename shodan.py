@@ -926,6 +926,8 @@ def search_and_mail(testing, checkurl,
                 break
             # sys.stderr.write("  Found matches in page {page}: {nummatches}\n".format(page=page, 
             #         nummatches=nummatches))
+            # TODO: take the host name from http.host
+            # TODO: extract an additional host name hint from http.html (link .. href="..")
             hosts = tuple((ip_address(match["ip"]), match["port"], "ssl" in match)
                     for match in shodan_results["matches"]
                         if "http" in match)
