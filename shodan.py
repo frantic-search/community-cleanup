@@ -87,26 +87,26 @@ MACRO_PRODUCTS = {
         WEAK_JENKINS: "Jenkins"
     }
 MACRO_LEGENDS = {
-        CHECK_COINHIVE: """Adversaries discovered a weakness in the device by taking control of 
-    it and setting up Coinhive in its HTML code.  This finding is not
-    exhaustive.  There may be other vulnerable routers or routers that were
-    infected but whose attackers did not set up Coinhive.
+        CHECK_COINHIVE: """Adversaries discovered a weakness in the device by 
+    taking control of it and setting up Coinhive in its HTML code.  This
+    finding is not exhaustive.  There may be other vulnerable routers or
+    routers that were infected but whose attackers did not set up Coinhive.
 
         https://www.zdnet.com/article/mikrotik-routers-enslaved-in-massive-coinhive-cryptojacking-campaign/
 
         https://www.securityweek.com/remotely-exploitable-vulnerability-discovered-mikrotiks-routeros""",
 
-        WEAK_AVTECH: """Adversaries may discover (or already discovered) a
-    chance to take control of the device due to a weakness in the firmware
-    or leaving the default password unchanged.
+        WEAK_AVTECH: """Adversaries may discover (or already discovered) a chance
+    to take control of the device due to a weakness in the firmware or leaving
+    the default password unchanged.
 
         https://seclists.org/bugtraq/2016/Oct/26
 
         https://www.exploit-db.com/exploits/40500""",
 
-        WEAK_JENKINS: """Jenkins servers left without a password protection allow downloading
-    source code, configuration files and build results.  The server software
-    and its plugins may have vulnerabilities of varying severities.
+        WEAK_JENKINS: """Jenkins servers left without a password protection allow
+    downloading source code, configuration files and build results.  The server
+    software and its plugins may have vulnerabilities of varying severities.
 
         https://www.jenkins.io/security/advisories/"""
     }
@@ -858,7 +858,8 @@ https://github.com/frantic-search/community-cleanup
 """.format(email=e, product=prodname,
     because=("" if smell is None else "\nbecause of %s" % (smell,)),
     logstr="\n    ".join(str(ehostlog) for ehostlog in ehostlogs),
-    legendpiece=("Legend:\n    %s\n\n" % (MACRO_LEGENDS[macro],) if macro in MACRO_LEGENDS else ""),
+    legendpiece=("Legend:\n    %s: %s\n\n" % (MACRO_VULNS[macro], MACRO_LEGENDS[macro],)
+            if macro in MACRO_LEGENDS else ""),
     reservation=RESERVATION))
 
         recipients = [myaddr]
@@ -1093,7 +1094,9 @@ def main(argv):
         raise SystemExit(0 if failures == 0 else 1 + (failures % 127))
 
     if testing:
-        from shodan_fixtures import FIXTURES
+        from shodan_fixtures import FIXTURES as fixtures
+    else:
+        fixtures = {}
 
     if not (rerun or shodanquery or product or country or component or macro):
         raise Usage()
@@ -1138,7 +1141,7 @@ def main(argv):
                     recheck(macro, rerun, all_emails[rerun],
                             myaddr, myipaddr, to_myself_only,
                             openers, httpcheckers, debuglevel,
-                            testing, **FIXTURES)
+                            testing, **fixtures)
                 else:
                     emailpat = re.compile(rerun)
                     for e in sorted(all_emails.keys()):
@@ -1146,7 +1149,7 @@ def main(argv):
                             recheck(macro, e, all_emails[e],
                                     myaddr, myipaddr, to_myself_only,
                                     openers, httpcheckers, debuglevel,
-                                    testing, **FIXTURES)
+                                    testing, **fixtures)
     else:
         search_and_mail(checkurl,
                 shodanquery, product, country, component, macro, 
@@ -1154,7 +1157,7 @@ def main(argv):
                 httpchecker, openers,
                 debuglevel,
                 testing,
-                **FIXTURES)
+                **fixtures)
 
 
 if __name__ == "__main__":
