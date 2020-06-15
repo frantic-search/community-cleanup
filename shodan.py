@@ -48,6 +48,7 @@ if os.name == "nt":
 import time
 
 from collections import namedtuple
+from functools import cmp_to_key
 from urllib import request, parse
 from urllib.error import HTTPError, URLError
 from http.client import BadStatusLine, CannotSendRequest
@@ -85,75 +86,11 @@ MACRO_PRODUCTS = {
         WEAK_AVTECH: "AVTech",
         WEAK_JENKINS: "Jenkins"
     }
-MACRO_FIXTURES = {
-        CHECK_COINHIVE: [{
-                "ip": 2917626385,
-                "port": 8080,
-                "http": {},
-                "product": "MikroTik http proxy",
-            }, {
-                "ip": 3494743649,
-                "port": 8080,
-                "http": {},
-                "product": "MikroTik http proxy",
-            }],
-        WEAK_AVTECH: [{
-                "ip": 1805602870,
-                "port": 88,
-                "product": "Avtech AVN801 network camera",
-            }, {
-                "ip": 412990438,
-                "port": 8888,
-                "http": {},
-                "product": "Avtech AVN801 network camera",
-            }, {
-                "ip": 2264972081,
-                "port": 88,
-                "http": {},
-                "product": "Avtech AVN801 network camera",
-                }],
-        WEAK_JENKINS: [{
-                "ip": "35.183.208.63",
-                "port": 8080,
-                "http": {},
-                "product": "Jenkins",
-            }]
-    }
-IP_SEARCH_FIXTURES = [
-        {
-            "ip": 386931311,
-            "port": 9090,
-            "http": {},
-            "product": "Avtech AVN801 network camera",
-        },
-        {
-            "ip": 3639140288,
-            "port": 8443,
-            "http": {},
-            "ssl": {},
-        },
-        {
-            "ip": 3639140288,
-            "port": 1723,
-        },
-        {
-            "ip": 2925431185,
-            "port": 8080,
-            "http": {},
-            "product": "MikroTik http proxy",
-        },
-        {
-            "ip": "35.183.208.63",
-            "port": 8080,
-            "http": {},
-            "product": "Jetty",
-        }
-    ]
 MACRO_LEGENDS = {
-        CHECK_COINHIVE: """Adversaries discovered a weakness in the device by
-    taking control of it and setting up Coinhive in its HTML code.  This
-    finding is not exhaustive.  There may be other vulnerable routers or
-    routers that were infected but whose attackers did not set up Coinhive.
+        CHECK_COINHIVE: """Adversaries discovered a weakness in the device by taking control of 
+    it and setting up Coinhive in its HTML code.  This finding is not
+    exhaustive.  There may be other vulnerable routers or routers that were
+    infected but whose attackers did not set up Coinhive.
 
         https://www.zdnet.com/article/mikrotik-routers-enslaved-in-massive-coinhive-cryptojacking-campaign/
 
@@ -359,7 +296,7 @@ def info_shodan(testing, **kwargs):
                 debuglevel=kwargs.get("debuglevel", 0))
 
 
-def search_shodan(testing, page, **kwargs):
+def search_shodan(page, **kwargs):
     url = "https://api.shodan.io/shodan/host/search"
     argsmap = (
             ("product", "product"),
@@ -382,6 +319,7 @@ def search_shodan(testing, page, **kwargs):
     kw = dict(kwargs)
     for shodan_fixup in shodan_fixups:
         shodan_fixup(kw)
+    testing = kw.pop("testing", False)
     querypieces = []
     query = kw.get("query")
     if query is not None:
@@ -394,6 +332,8 @@ def search_shodan(testing, page, **kwargs):
     sys.stderr.write("Inquiring shodan.io with \"%s\" (page %d)...\n" % (queryargvalue, page,))
 
     if testing:
+        MACRO_FIXTURES = kw.pop("MACRO_FIXTURES")
+        IP_SEARCH_FIXTURES = kw.pop("IP_SEARCH_FIXTURES")
         if page > 1:
             return (HTTPStatus.OK, {"matches": []})
         qlow = queryargvalue.lower()
@@ -451,36 +391,27 @@ IPV6ADDR_COMPILED = re.compile(IPV6ADDR)
 
 RDAP_BOOTSTRAP = "https://rdap.org"
 
-def whoseip(ip, whoserole, debuglevel=0):
+def whoseip(ip, whoserole, debuglevel=0, unittesting=False, **fixtures):
     r"""
     Obtain email addresses of a given role for the given IP address.
 
-    >>> print('#'); whoseip('71.17.138.152', 'abuse', debuglevel)
-    #
-    ...['sasktel.wanec@sasktel.com']
+    >>> unittesting
+    True
 
-    >>> whoseip('109.87.56.48', 'abuse')
+    >>> print('#'); whoseip('71.17.138.152', 'abuse', debuglevel, unittesting, **fixtures)
+    #...
+    ['sasktel.wanec@sasktel.com']
+
+    >>> print('#'); whoseip('109.87.56.48', 'abuse', debuglevel, unittesting, **fixtures)
+    #...
     ['abuse@triolan.com.ua']
 
-    >>> whoseip('76.67.127.81', 'abuse')
-    ['abuse@sympatico.ca', 'abuse@bell.ca']
-
-    >>> whoseip('24.84.44.189', 'abuse')
-    ['ipadmin@sjrb.ca']
-
-    >>> whoseip('199.19.213.77', 'abuse')
-    ['mnaser@vexxhost.com']
-
-    >>> whoseip('build.automotivelinux.org', 'abuse')
+    >>> print('#'); whoseip('build.automotivelinux.org', 'abuse', debuglevel, unittesting, **fixtures)
+    #...
     ['abuse@enom.com']
 
-    >>> whoseip('104.31.68.51', 'abuse')
-    ['abuse@cloudflare.com']
-
-    >>> whoseip('68.183.197.228', 'abuse')
-    ['abuse@digitalocean.com']
-
-    >>> whoseip('ci.jwfh.ca', 'abuse')
+    >>> print('#'); whoseip('ci.jwfh.ca', 'abuse', debuglevel, unittesting, **fixtures)
+    #...
     []
     """
 
@@ -495,7 +426,11 @@ def whoseip(ip, whoserole, debuglevel=0):
 
     if IPV4ADDR_COMPILED.match(ip) or IPV6ADDR_COMPILED.match(ip):     
         url = "%s/ip/%s" % (RDAP_BOOTSTRAP, ip,)
-        (code, whoseobj) = resilient_send(request.Request(url), debuglevel=debuglevel)
+        if unittesting:
+            (code, whoseobj) = fixtures["WHOSEIP_FIXTURES"][ip]
+        else:
+            (code, whoseobj) = resilient_send(request.Request(url), debuglevel=debuglevel)
+            # print(pformat(whoseobj))
         if code != HTTPStatus.OK:
             return []
     else:
@@ -505,7 +440,11 @@ def whoseip(ip, whoserole, debuglevel=0):
                 return []
             domain = ".".join(splits)
             url = "%s/domain/%s" % (RDAP_BOOTSTRAP, domain,)
-            (code, whoseobj) = resilient_send(request.Request(url), debuglevel=debuglevel)
+            if unittesting:
+                (code, whoseobj) = fixtures["WHOSEIP_FIXTURES"][domain]
+            else:
+                (code, whoseobj) = resilient_send(request.Request(url), debuglevel=debuglevel)
+                # print(pformat(whoseobj))
             if code != HTTPStatus.OK:
                 del splits[0]
             else:
@@ -661,6 +600,63 @@ class HostLog(namedtuple("HostLog", ("ip", "ts", "vuln", "findings"))):
     def __str__(self):
         return "{ip!s:>15} {ts} {vuln:<17} {finds}".format(finds = ", ".join(self.findings),
                 **self._asdict())
+
+
+def cmp_hosts(a, b):
+    r"""
+    unknown < str < IPv4Address < IPv6Address
+
+    Comparisons left-to-right (including own types): 4 + 3 + 2 + 1 = 10
+    Comparisons right-to-left (excluding own types): 3 + 2 + 1 = 6
+    Sub-total: 16
+
+    Optimizing away LTR unknown-to-others: -2
+    Optimizing away LTR str-to-IPv{4,6}: -1
+
+    Optimizing away RTL IPv6-to-others: -2
+    Optimizing away RTL IPv4-to-others: -1
+
+    Total: 10
+
+    >>> lst = [ip_address("127.0.0.2"), ip_address("::1"), ip_address("127.0.0.2"), "foobar.test"]
+    >>> lst.sort(key=cmp_to_key(cmp_hosts))
+    """
+    if type(a) is str:
+        if type(b) is str:
+            # "hosta.tld" <> "hostb.tld" lexicographically
+            return a < b
+        elif (type(b) is IPv4Address) or (type(b) is IPv6Address):
+            # str < {IPv{4,6}Address,unknown}
+            return -1
+        else:
+            # str > unknown
+            return +1
+    elif type(a) is IPv4Address:
+        if type(b) is IPv4Address:
+            # IPv4Address <> IPv4Address
+            return a < b
+        elif type(b) is IPv6Address:
+            # IPv4Address < IPv6Address
+            return -1
+        elif type(b) is str:
+            # IPv4Address > str
+            # IPv4Address > unknown
+            return +1
+    elif type(a) is IPv6Address:
+        if type(b) is IPv6Address:
+            # IPv6Address <> IPv6Address
+            return a < b
+        else:
+            # IPv6Address > IPv4Address
+            # IPv6Address > str
+            # IPv6Address > unknown
+            return +1
+    elif (type(b) is IPv4Address) or (type(b) is IPv6Address):
+        # unknown < IPv{4,6}Address
+        return -1
+    else:
+        # unknown <> unknown
+        return a < b
 
 
 def log_hosts(testing, macro, hosts, openers, httpcheckers, debuglevel=0):
@@ -900,10 +896,12 @@ def chunks(seq, n):
         yield tuple(chunk)
 
 
-def recheck(testing, macro, rerun, ips,
+def recheck(macro, rerun, ips,
         myaddr, myipaddr, to_myself_only,
         openers, httpcheckers,
-        debuglevel):
+        debuglevel,
+        testing=False,
+        **fixtures):
     if testing:
         ips = tuple(ip_address(ip) for ip in TEST_IPS)
     logs = []
@@ -913,10 +911,12 @@ def recheck(testing, macro, rerun, ips,
         ips_chunk_str = ",".join(str(ip) for ip in ips_chunk)
         page = 1
         while True:
-            (shodan_code, shodan_results) = search_shodan(testing, page,
+            (shodan_code, shodan_results) = search_shodan(page,
                     ip=ips_chunk_str,
                     debuglevel=debuglevel,
-                    timeout=SHODAN_LARGE_TIMEOUT)
+                    timeout=SHODAN_LARGE_TIMEOUT,
+                    testing=testing,
+                    **fixtures)
             if shodan_code != HTTPStatus.OK:
                 sys.stderr.write("Unexpected Shodan code %d, response:\n%s\n" % (shodan_code, pformat(shodan_results),))
                 continue_chunks = False
@@ -943,11 +943,13 @@ def recheck(testing, macro, rerun, ips,
     send_logs_mail(testing, myaddr, to_myself_only, myipaddr, rerun, matched_macros, logs)
 
 
-def search_and_mail(testing, checkurl,
+def search_and_mail(checkurl,
         shodanquery, product, country, component, macro, 
         all_emails, sent_name, myaddr, to_myself_only,
         httpchecker, openers, 
-        debuglevel):
+        debuglevel,
+        testing=False,
+        **fixtures):
     ready_emaillogs = {}
     if checkurl is None:
         page = 1
@@ -958,10 +960,12 @@ def search_and_mail(testing, checkurl,
             if shodan_code != HTTPStatus.OK:
                 break
 
-            (shodan_code, shodan_results) = search_shodan(testing, page,
+            (shodan_code, shodan_results) = search_shodan(page,
                     query=shodanquery,
                     product=product, country=country, component=component,
-                    debuglevel=debuglevel)
+                    debuglevel=debuglevel,
+                    testing=testing,
+                    **fixtures)
             if shodan_code != HTTPStatus.OK:
                 sys.stderr.write("Unexpected Shodan code %d, response:\n%s\n" % (shodan_code, pformat(shodan_results),))
                 break
@@ -1079,10 +1083,17 @@ def main(argv):
 
     if unittesting:
         import doctest
+        from shodan_fixtures import FIXTURES
         (failures, tests) = doctest.testmod(verbose=(not not debuglevel),
-                extraglobs=(('debuglevel', debuglevel),),
+                extraglobs=dict(debuglevel=debuglevel,
+                    unittesting=unittesting,
+                    fixtures=FIXTURES,
+                    **FIXTURES),
                 optionflags=doctest.ELLIPSIS)
         raise SystemExit(0 if failures == 0 else 1 + (failures % 127))
+
+    if testing:
+        from shodan_fixtures import FIXTURES
 
     if not (rerun or shodanquery or product or country or component or macro):
         raise Usage()
@@ -1124,22 +1135,26 @@ def main(argv):
                 sys.stderr.write("My IP: %s\n" % (myip,))
                 myipaddr = ip_address(myip)
                 if rerun in all_emails:
-                    recheck(testing, macro, rerun, all_emails[rerun],
+                    recheck(macro, rerun, all_emails[rerun],
                             myaddr, myipaddr, to_myself_only,
-                            openers, httpcheckers, debuglevel)
+                            openers, httpcheckers, debuglevel,
+                            testing, **FIXTURES)
                 else:
                     emailpat = re.compile(rerun)
                     for e in sorted(all_emails.keys()):
                         if emailpat.match(e):
-                            recheck(testing, macro, e, all_emails[e],
+                            recheck(macro, e, all_emails[e],
                                     myaddr, myipaddr, to_myself_only,
-                                    openers, httpcheckers, debuglevel)
+                                    openers, httpcheckers, debuglevel,
+                                    testing, **FIXTURES)
     else:
-        search_and_mail(testing, checkurl,
+        search_and_mail(checkurl,
                 shodanquery, product, country, component, macro, 
                 all_emails, sent_name, myaddr, to_myself_only,
                 httpchecker, openers,
-                debuglevel)
+                debuglevel,
+                testing,
+                **FIXTURES)
 
 
 if __name__ == "__main__":
