@@ -167,10 +167,9 @@ MACRO_LEGENDS = {
 
         https://www.exploit-db.com/exploits/40500""",
 
-        WEAK_JENKINS: """Jenkins servers left without a password protection
-    allow downloading source code, configuration files and build results.
-    The server software and its plugins may have vulnerabilities of varying
-    severities.
+        WEAK_JENKINS: """Jenkins servers left without a password protection allow downloading
+    source code, configuration files and build results.  The server software
+    and its plugins may have vulnerabilities of varying severities.
 
         https://www.jenkins.io/security/advisories/"""
     }
@@ -725,7 +724,12 @@ def record_hosts(testing, hosts, macro, openers, httpchecker, ready_emaillogs, a
                 ip = getipaddr(rephost, port)
                 for e in whoseip(lookup_name, "abuse", debuglevel):
                     found_emails = True
-                    sys.stderr.write("  %s\n" % (e,))
+                    if e in page_emails:
+                        # Quiet down even though this may record a related IP
+                        # address under the same email address.
+                        pass
+                    else:
+                        sys.stderr.write("  %s\n" % (e,))
                     page_ehosts = page_emails.get(e, [])
                     ready_ehostlogs = ready_emaillogs.get(e, [])
                     all_ehosts = all_emails.get(e, [])
