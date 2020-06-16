@@ -618,8 +618,10 @@ def cmp_hosts(a, b):
 
     Total: 10
 
-    >>> lst = [ip_address("127.0.0.2"), ip_address("::1"), ip_address("127.0.0.2"), "foobar.test"]
+    >>> lst = [ip_address("127.0.0.2"), ip_address("::1"), ip_address("127.0.0.1"), "foobar.test", "abc.def.test"]
     >>> lst.sort(key=cmp_to_key(cmp_hosts))
+    >>> lst
+    ['foobar.test', 'abc.def.test', IPv4Address('127.0.0.1'), IPv4Address('127.0.0.2'), IPv6Address('::1')]
     """
     if type(a) is str:
         if type(b) is str:
@@ -634,7 +636,7 @@ def cmp_hosts(a, b):
     elif type(a) is IPv4Address:
         if type(b) is IPv4Address:
             # IPv4Address <> IPv4Address
-            return a < b
+            return -1 if (a < b) else (0 if (a == b) else +1)
         elif type(b) is IPv6Address:
             # IPv4Address < IPv6Address
             return -1
@@ -645,7 +647,7 @@ def cmp_hosts(a, b):
     elif type(a) is IPv6Address:
         if type(b) is IPv6Address:
             # IPv6Address <> IPv6Address
-            return a < b
+            return -1 if (a < b) else (0 if (a == b) else +1)
         else:
             # IPv6Address > IPv4Address
             # IPv6Address > str
@@ -656,7 +658,10 @@ def cmp_hosts(a, b):
         return -1
     else:
         # unknown <> unknown
-        return a < b
+        return -1 if (a < b) else (0 if (a == b) else +1)
+
+
+host_comparing_key_getter = cmp_to_key(cmp_hosts)
 
 
 def log_hosts(testing, macro, hosts, openers, httpcheckers, debuglevel=0):
@@ -743,16 +748,16 @@ def record_hosts(testing, hosts, macro, openers, httpchecker, ready_emaillogs, a
     sys.stderr.write("\n")
     for e in sorted(page_emails.keys()):
         page_ehosts = page_emails[e]
-        page_ehosts.sort()
+        page_ehosts.sort(key=host_comparing_key_getter)
         sys.stderr.write("%s: %s\n" % (e, ", ".join(str(page_ehost) for page_ehost in page_ehosts)))
 
     for e in sorted(ready_emaillogs.keys()):
         ready_ehostlogs = ready_emaillogs[e]
-        ready_ehostlogs.sort()
+        ready_ehostlogs.sort(key=host_comparing_key_getter)
 
     for e in sorted(all_emails.keys()):
         all_ehosts = all_emails[e]
-        all_ehosts.sort()
+        all_ehosts.sort(key=host_comparing_key_getter)
 
 
 def extract_thing(shodanquery):
