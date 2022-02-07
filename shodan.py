@@ -51,7 +51,7 @@ from collections import namedtuple
 from functools import cmp_to_key
 from urllib import request, parse
 from urllib.error import HTTPError, URLError
-from http.client import BadStatusLine, CannotSendRequest
+from http.client import BadStatusLine, CannotSendRequest, IncompleteRead
 from http import HTTPStatus
 import ssl
 import json
@@ -62,6 +62,7 @@ import struct, socket, sys
 import smtplib
 from email.mime.text import MIMEText
 import re
+from contextlib import contextmanager
 
 
 SEND_PAGES = 3
@@ -120,12 +121,16 @@ SHODAN_TIMEOUT = 15
 SHODAN_LARGE_TIMEOUT = 45
 URL_TIMEOUT = 5
 REPEAT_SLEEP = 5
-NETWORK_ERRORS = (socket.timeout, socket.error, socket.herror, socket.gaierror,
+NETWORK_ERRORS = (socket.timeout,
+        socket.error, socket.herror, socket.gaierror,
         OSError,
-        BadStatusLine, CannotSendRequest,
+        BadStatusLine, CannotSendRequest, IncompleteRead,
         ConnectionRefusedError, ConnectionResetError, 
         URLError)
 
+# The following address family limit is implemented only in
+# myip_shodan.
+FORCE_IP_FAMILY = "IPv4"
 
 class Usage(SystemExit):
     def __init__(self, message=None):
@@ -250,22 +255,81 @@ def getipaddr(host, port=None):
     return host
 
 
+IP_FAMILIES = (
+        (socket.AddressFamily.AF_INET, "IPv4"),
+        (socket.AddressFamily.AF_INET6, "IPv6"),
+    )
+
+
+# This is not thread-safe because it modifies the global (module socket)
+@contextmanager
+def fam_socket(fam):
+    # https://stackoverflow.com/questions/1150332/source-interface-with-python-and-urllib2
+    orig_getaddrinfo = socket.getaddrinfo
+    orig_socket = socket.socket
+
+    def fam_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        nonlocal orig_getaddrinfo
+        return orig_getaddrinfo(host, port,
+                fam if family == 0 else family,
+                type, proto, flags)
+
+    class fam_socket(orig_socket):
+        def __init__(self, *a, **k):
+            # print("Handling a socket init with family %s, args %s, kw %s\n" % (fam, a, k))
+            repl_args = (fam,) + a[1:]
+            # print("New args %s\n" % (repl_args,))
+            super().__init__(*repl_args, **k)
+
+    try:
+        socket.getaddrinfo = fam_getaddrinfo
+        socket.socket = fam_socket
+        yield socket
+    finally:
+        socket.getaddrinfo = orig_getaddrinfo
+        socket.socket = orig_socket
+
+
 def myip_shodan(testing, **kwargs):
     url = "https://api.shodan.io/tools/myip"
     sys.stderr.write("Inquiring shodan.io on my IP address...\n")
     if testing:
         return (HTTPStatus.OK, "45.56.111.4")
 
-    with open(os.path.expanduser("~/.shodan")) as f:
-        shodan_key = f.read().strip()
+    shodan_key = get_shodan_key()
 
-    return resilient_send(request.Request(url,
-                parse.urlencode((
-                        ("key", shodan_key),
-                    )).encode("ascii")),
-                timeout=kwargs.get("timeout", SHODAN_TIMEOUT),
-                repeatsleep=kwargs.get("repeatsleep", REPEAT_SLEEP),
-                debuglevel=kwargs.get("debuglevel", 0))
+    def request_myip():
+        nonlocal url, shodan_key, kwargs
+        (code, myip) = resilient_send(request.Request(url,
+            parse.urlencode((
+                    ("key", shodan_key),
+                )).encode("ascii")),
+            timeout=kwargs.get("timeout", SHODAN_TIMEOUT),
+            repeatsleep=kwargs.get("repeatsleep", REPEAT_SLEEP),
+            debuglevel=kwargs.get("debuglevel", 0))
+        if code != HTTPStatus.OK:
+            raise ValueError("The tools/myip API failed.")
+        return myip
+
+    myip = None
+    for ipfamily in IP_FAMILIES:
+        if (FORCE_IP_FAMILY == "IPv4/v6") or (ipfamily[1] == FORCE_IP_FAMILY):
+            try:
+                if FORCE_IP_FAMILY == "IPv4/v6":
+                    myip = request_myip()
+                else:
+                    with fam_socket(ipfamily[0]) as socket:
+                        myip = request_myip()
+                break
+            except NETWORK_ERRORS as e:
+                log_network_error(e, url)
+    return myip
+
+
+def get_shodan_key():
+    with open(os.path.expanduser("~/.config/shodan/api_key")) as f:
+        shodan_key = f.read().strip()
+    return shodan_key
 
 
 def info_shodan(testing, **kwargs):
@@ -284,8 +348,7 @@ def info_shodan(testing, **kwargs):
                               "query_credits": 100,
                               "scan_credits": 100}})
 
-    with open(os.path.expanduser("~/.shodan")) as f:
-        shodan_key = f.read().strip()
+    shodan_key = get_shodan_key()
 
     return resilient_send(request.Request(url,
                 parse.urlencode((
@@ -350,8 +413,7 @@ def search_shodan(page, **kwargs):
             raise Usage("Only products {products}, as well as IP lookups, are mocked as Shodan results"
                     .format(products=", ".join(sorted(MACRO_PRODUCTS.keys()))))
 
-    with open(os.path.expanduser("~/.shodan")) as f:
-        shodan_key = f.read().strip()
+    shodan_key = get_shodan_key()
 
     return resilient_send(request.Request("%s?%s" % (url,
                 parse.urlencode((
@@ -925,8 +987,14 @@ def recheck(macro, rerun, ips,
                     **fixtures)
             if shodan_code != HTTPStatus.OK:
                 sys.stderr.write("Unexpected Shodan code %d, response:\n%s\n" % (shodan_code, pformat(shodan_results),))
-                continue_chunks = False
-                break
+                sleep_with_banner(REPEAT_SLEEP)
+                continue
+
+            if "matches" not in shodan_results:
+                sys.stderr.write("Missing \"matches\" in response:\n%s\n" % (pformat(shodan_results),))
+                sleep_with_banner(REPEAT_SLEEP)
+                continue
+
             nummatches = len(shodan_results["matches"])
             if nummatches == 0:
                 sys.stderr.write("  No more matches\n")
@@ -957,13 +1025,22 @@ def search_and_mail(checkurl,
         testing=False,
         **fixtures):
     ready_emaillogs = {}
+    err = 0
     if checkurl is None:
         page = 1
         page_sender_count = 0
         while True:
             (shodan_code, shodan_limits) = info_shodan(testing, debuglevel=debuglevel)
             sys.stderr.write("Shodan code %d, limits:\n%s\n" % (shodan_code, pformat(shodan_limits),))
+            if shodan_code == HTTPStatus.UNAUTHORIZED:
+                err = 1
+                break
             if shodan_code != HTTPStatus.OK:
+                sleep_with_banner(REPEAT_SLEEP)
+                continue
+            if shodan_limits.get("query_credits", 0) == 0:
+                sys.stderr.write("Exhausted query credits, exiting prematurely.\n")
+                err = 1
                 break
 
             (shodan_code, shodan_results) = search_shodan(page,
@@ -974,7 +1051,13 @@ def search_and_mail(checkurl,
                     **fixtures)
             if shodan_code != HTTPStatus.OK:
                 sys.stderr.write("Unexpected Shodan code %d, response:\n%s\n" % (shodan_code, pformat(shodan_results),))
-                break
+                sleep_with_banner(REPEAT_SLEEP)
+                continue
+
+            if "matches" not in shodan_results:
+                sys.stderr.write("Missing \"matches\" in response:\n%s\n" % (pformat(shodan_results),))
+                sleep_with_banner(REPEAT_SLEEP)
+                continue
 
             nummatches = len(shodan_results["matches"])
             if nummatches == 0:
@@ -1013,6 +1096,7 @@ def search_and_mail(checkurl,
     send_mail(testing, ready_emaillogs, myaddr, to_myself_only,
             shodanquery, product, component, macro)
     write_sent_emails(testing, to_myself_only, sent_name, all_emails)
+    return err
 
 
 class AutoFlush:
@@ -1103,7 +1187,7 @@ def main(argv):
     else:
         fixtures = {}
 
-    if not (rerun or shodanquery or product or country or component or macro):
+    if not (rerun or checkurl or shodanquery or product or country or component or macro):
         raise Usage()
 
     if rerun:
@@ -1137,24 +1221,28 @@ def main(argv):
     if rerun:
         (shodan_code, shodan_limits) = info_shodan(testing, debuglevel=debuglevel)
         sys.stderr.write("Shodan code %d, limits:\n%s\n" % (shodan_code, pformat(shodan_limits),))
-        if shodan_code == HTTPStatus.OK:
-            (shodan_code, myip) = myip_shodan(testing, debuglevel=debuglevel)
-            if shodan_code == HTTPStatus.OK:
-                sys.stderr.write("My IP: %s\n" % (myip,))
-                myipaddr = ip_address(myip)
-                if rerun in all_emails:
-                    recheck(macro, rerun, all_emails[rerun],
+        if shodan_code != HTTPStatus.OK:
+            return 1
+        if shodan_limits.get("query_credits", 0) == 0:
+            sys.stderr.write("Exhausted query credits, exiting prematurely.\n")
+            return 1
+
+        myip = myip_shodan(testing, debuglevel=debuglevel)
+        sys.stderr.write("My IP: %s %s\n" % (FORCE_IP_FAMILY, myip,))
+        myipaddr = ip_address(myip)
+        if rerun in all_emails:
+            recheck(macro, rerun, all_emails[rerun],
+                    myaddr, myipaddr, to_myself_only,
+                    openers, httpcheckers, debuglevel,
+                    testing, **fixtures)
+        else:
+            emailpat = re.compile(rerun)
+            for e in sorted(all_emails.keys()):
+                if emailpat.match(e):
+                    recheck(macro, e, all_emails[e],
                             myaddr, myipaddr, to_myself_only,
                             openers, httpcheckers, debuglevel,
                             testing, **fixtures)
-                else:
-                    emailpat = re.compile(rerun)
-                    for e in sorted(all_emails.keys()):
-                        if emailpat.match(e):
-                            recheck(macro, e, all_emails[e],
-                                    myaddr, myipaddr, to_myself_only,
-                                    openers, httpcheckers, debuglevel,
-                                    testing, **fixtures)
     else:
         search_and_mail(checkurl,
                 shodanquery, product, country, component, macro, 
@@ -1163,7 +1251,7 @@ def main(argv):
                 debuglevel,
                 testing,
                 **fixtures)
-
+    return 0
 
 if __name__ == "__main__":
     import sys
